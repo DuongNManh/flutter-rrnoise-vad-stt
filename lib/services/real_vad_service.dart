@@ -65,12 +65,12 @@ class RealVADService extends ChangeNotifier {
   final List<AudioSegment> _segments = [];
 
   // Stream controllers
-  StreamController<double> _audioLevelController =
-      StreamController<double>.broadcast();
-  StreamController<List<double>> _waveformController =
-      StreamController<List<double>>.broadcast();
-  StreamController<bool> _speechDetectedController =
-      StreamController<bool>.broadcast();
+  final StreamController<double> _audioLevelController =
+      StreamController<double>.broadcast(); // lấy mức âm thanh
+  final StreamController<List<double>> _waveformController =
+      StreamController<List<double>>.broadcast(); // lấy dạng sóng âm thanh
+  final StreamController<bool> _speechDetectedController =
+      StreamController<bool>.broadcast(); // lấy trạng thái phát hiện giọng nói
 
   // Current state
   bool _isRecording = false;
@@ -106,13 +106,14 @@ class RealVADService extends ChangeNotifier {
     try {
       // Initialize the VAD handler with debug mode enabled for verbose logging
       _vadHandler = VadHandler.create(isDebug: true);
-      
+
       // Setup event listeners in startRecording method
       print('VAD handler initialized successfully');
     } catch (e) {
       print('Error initializing VAD: $e');
     }
-  }  // Start recording with VAD detection
+  } // Start recording with VAD detection
+
   Future<void> startRecording() async {
     if (_isRecording || _vadHandler == null) return;
 
@@ -135,7 +136,7 @@ class RealVADService extends ChangeNotifier {
       final tempDir = await getTemporaryDirectory();
       _currentRecordingPath =
           '${tempDir.path}/vad_recording_${DateTime.now().millisecondsSinceEpoch}.wav';
-      
+
       // Create recording configuration
       final config = RecordConfig(
         encoder: AudioEncoder.wav,
@@ -145,32 +146,27 @@ class RealVADService extends ChangeNotifier {
       );
 
       // Start recording
-      await _record.start(
-        config,
-        path: _currentRecordingPath!,
-      );
+      await _record.start(config, path: _currentRecordingPath!);
 
       _isRecording = true;
       notifyListeners();
-      
+
       // Setup VAD handler listeners
       _setupVADHandlerListeners();
-      
+
       // Sử dụng cách gọi cho phiên bản vad 0.0.6 (hỗ trợ tham số model)
       await _vadHandler.startListening(
         positiveSpeechThreshold: 0.5,
         negativeSpeechThreshold: 0.3,
-        frameSamples: 512,  // 512 là giá trị tối ưu cho model v5
+        frameSamples: 512, // 512 là giá trị tối ưu cho model v5
         minSpeechFrames: 2,
         preSpeechPadFrames: 1,
         redemptionFrames: 3,
         submitUserSpeechOnPause: false,
-        model: 'v5',  // Sử dụng model Silero VAD v5 mới nhất
+        model: 'v5', // Sử dụng model Silero VAD v5 mới nhất
       );
       print('Started VAD for audio processing');
-      
-      // Start monitoring audio levels for visualization only
-      _startAudioLevelMonitoring();
+
       print('Recording started with real VAD');
     } catch (e) {
       print('Error starting recording: $e');
@@ -183,7 +179,7 @@ class RealVADService extends ChangeNotifier {
       // Set up VAD event listeners
       _vadHandler.onSpeechStart?.listen((_) {
         debugPrint('Speech detected.');
-        
+
         // Calculate time from recording start
         double timeFromStart = 0.0;
         if (_recordingStartTime != null) {
@@ -191,14 +187,20 @@ class RealVADService extends ChangeNotifier {
               DateTime.now().difference(_recordingStartTime!).inMilliseconds /
               1000;
         }
-        
+
         // Start a new speech segment
         _startSpeechSegment(0.9, timeFromStart);
-        
+
         // Update state
         _isSpeechDetected = true;
-        _currentConfidence = 0.9; // VAD is confident enough to detect speech
-        
+        // Try to get confidence from VAD event if available
+        double confidence = 0.9;
+        if (_vadHandler.lastFrameData != null &&
+            _vadHandler.lastFrameData.speechProbability != null) {
+          confidence = _vadHandler.lastFrameData.speechProbability;
+        }
+        _currentConfidence = confidence;
+
         // Notify UI
         _speechDetectedController.add(true);
         notifyListeners();
@@ -206,7 +208,7 @@ class RealVADService extends ChangeNotifier {
 
       _vadHandler.onRealSpeechStart?.listen((_) {
         debugPrint('Real speech start detected (not a misfire).');
-        
+
         // Update confidence to maximum
         _currentConfidence = 1.0;
         notifyListeners();
@@ -214,7 +216,7 @@ class RealVADService extends ChangeNotifier {
 
       _vadHandler.onSpeechEnd?.listen((samples) {
         debugPrint('Speech ended');
-        
+
         // Calculate time from recording start
         double timeFromStart = 0.0;
         if (_recordingStartTime != null) {
@@ -222,14 +224,14 @@ class RealVADService extends ChangeNotifier {
               DateTime.now().difference(_recordingStartTime!).inMilliseconds /
               1000;
         }
-        
+
         // End speech segment
         _endSpeechSegment(timeFromStart: timeFromStart);
-        
+
         // Update state
         _isSpeechDetected = false;
         _currentConfidence = 0.1; // Reset confidence when speech ends
-        
+
         // Notify UI
         _speechDetectedController.add(false);
         notifyListeners();
@@ -238,31 +240,32 @@ class RealVADService extends ChangeNotifier {
       _vadHandler.onFrameProcessed?.listen((frameData) {
         // Update confidence based on speech probability
         _currentConfidence = frameData.isSpeech;
-        
+
         // Update audio levels for visualization
         final avgLevel = _calculateAudioLevel(frameData.frame);
         _updateAudioLevel(avgLevel);
-        
+
         // Notify listeners of state changes
         notifyListeners();
       });
 
       _vadHandler.onVADMisfire?.listen((_) {
         debugPrint('VAD misfire detected.');
-        
+
         // Add to events but don't change speech detection state
         _events.add(
           VADEvent(
             timestamp: DateTime.now(),
             isSpeech: false,
             confidenceScore: 0.3,
-            timeFromStart: DateTime.now()
-                .difference(_recordingStartTime ?? DateTime.now())
-                .inMilliseconds /
+            timeFromStart:
+                DateTime.now()
+                    .difference(_recordingStartTime ?? DateTime.now())
+                    .inMilliseconds /
                 1000,
           ),
         );
-        
+
         notifyListeners();
       });
 
@@ -273,7 +276,7 @@ class RealVADService extends ChangeNotifier {
       debugPrint('Error setting up VAD handler: $e');
     }
   }
-  
+
   // Calculate audio level from audio frame
   double _calculateAudioLevel(List<double> audioFrame) {
     if (audioFrame.isEmpty) return 0.0;
@@ -283,7 +286,7 @@ class RealVADService extends ChangeNotifier {
     for (var sample in audioFrame) {
       sum += sample.abs();
     }
-    
+
     return (sum / audioFrame.length) * 100; // Scale to 0-100 range
   }
 
@@ -315,7 +318,7 @@ class RealVADService extends ChangeNotifier {
 
       // Stop recording - API không thay đổi nhưng trả về đường dẫn tệp đã ghi
       final recordedFilePath = await _record.stop();
-      
+
       // Cập nhật đường dẫn nếu có
       if (recordedFilePath != null) {
         _currentRecordingPath = recordedFilePath;
@@ -331,17 +334,6 @@ class RealVADService extends ChangeNotifier {
       print('Error stopping recording: $e');
     }
   }
-
-  // Start monitoring audio levels (for visualization only)
-  void _startAudioLevelMonitoring() {
-    // Sử dụng VadHandler để giám sát mức âm thanh thay vì phụ thuộc vào API của AudioRecorder
-    // VadHandler sẽ xử lý việc này trong onFrameProcessed
-    
-    // Nếu bạn muốn giám sát mức âm thanh song song, sử dụng cơ chế khác ở đây
-    print('Audio level monitoring is now handled by VAD handler via onFrameProcessed');
-  }
-
-  // Phương thức _processVAD đã được loại bỏ, chúng ta sử dụng VAD handler để xử lý thay thế  // Phương thức này không còn cần thiết vì chúng ta sử dụng handler event listeners
 
   // Start a new speech segment
   void _startSpeechSegment(double confidence, double timeFromStart) {
@@ -445,7 +437,7 @@ class RealVADService extends ChangeNotifier {
     } catch (e) {
       print('Error disposing AudioRecorder: $e');
     }
-    
+
     // Close các StreamController
     try {
       _audioLevelController.close();
