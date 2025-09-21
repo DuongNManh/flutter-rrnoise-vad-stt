@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'screens/home_screen.dart';
+import 'services/stt_test_service.dart';
 
 void main() async {
   // Ensure Flutter is initialized
@@ -16,6 +17,9 @@ void main() async {
 
   // Initialize WebRTC globally
   await WebRTC.initialize();
+
+  // Initialize STT service
+  STTTestService.initialize();
 
   runApp(const MyApp());
 }

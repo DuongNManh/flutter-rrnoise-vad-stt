@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:vad/vad.dart';
 import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'google_stt_service.dart';
 
 /// Model class to represent an audio segment detected by VAD
 class AudioSegment {
@@ -16,6 +18,12 @@ class AudioSegment {
   final double confidenceScore;
   final Duration duration;
 
+  // STT-related fields
+  String? transcript;
+  double? sttConfidence;
+  DateTime? transcriptTime;
+  bool? isProcessingSTT;
+
   AudioSegment({
     required this.id,
     required this.path,
@@ -23,10 +31,32 @@ class AudioSegment {
     required this.endTime,
     required this.confidenceScore,
     required this.duration,
+    this.transcript,
+    this.sttConfidence,
+    this.transcriptTime,
+    this.isProcessingSTT = false,
   });
 
   // Get formatted start time (seconds from recording start)
   String get formattedStartTime => '${duration.inMilliseconds / 1000}s';
+
+  // STT helper methods
+  bool get hasTranscript => transcript != null && transcript!.isNotEmpty;
+  bool get isSTTProcessed => transcript != null;
+  String get displayText => transcript ?? 'Processing...';
+
+  // Update transcript info
+  void updateTranscript(String newTranscript, double confidence) {
+    transcript = newTranscript;
+    sttConfidence = confidence;
+    transcriptTime = DateTime.now();
+    isProcessingSTT = false;
+  }
+
+  // Mark as processing STT
+  void markProcessingSTT() {
+    isProcessingSTT = true;
+  }
 }
 
 /// Model class to represent a VAD event for logging
@@ -60,6 +90,9 @@ class PackageVadService extends ChangeNotifier {
   // Record instance for recording to file (separate from VAD recording)
   final _record = AudioRecorder();
 
+  // Google STT service (optional)
+  GoogleSTTService? _sttService;
+
   // Lists to track audio data and events
   final List<double> _audioLevels = [];
   final List<VADEvent> _events = [];
@@ -69,6 +102,7 @@ class PackageVadService extends ChangeNotifier {
   final _audioLevelController = StreamController<double>.broadcast();
   final _waveformController = StreamController<List<double>>.broadcast();
   final _speechDetectedController = StreamController<bool>.broadcast();
+  final _transcriptionController = StreamController<String>.broadcast();
 
   // Current state
   bool _isRecording = false;
@@ -79,6 +113,25 @@ class PackageVadService extends ChangeNotifier {
   String? _currentRecordingPath;
   Timer? _audioLevelTimer;
 
+  // Speech continuation tracking
+  DateTime? _lastSpeechActivityTime;
+  double _confidenceHistory = 0.0;
+  int _consecutiveLowConfidenceFrames = 0;
+  final int _maxLowConfidenceFrames =
+      10; // Allow 10 low confidence frames before ending speech
+
+  // Performance monitoring
+  int _totalFramesProcessed = 0;
+  int _speechFramesDetected = 0;
+  DateTime? _lastPerformanceLog;
+
+  // UI update throttling
+  DateTime? _lastUIUpdate;
+  final int _uiUpdateThrottleMs = 50; // Update UI max every 50ms
+  double _lastReportedConfidence = 0.0;
+  final double _confidenceChangeThreshold =
+      0.05; // Only update if confidence changes by 5%
+
   // Getters
   bool get isRecording => _isRecording;
   bool get isSpeechDetected => _isSpeechDetected;
@@ -87,13 +140,22 @@ class PackageVadService extends ChangeNotifier {
   List<VADEvent> get events => List.unmodifiable(_events);
   List<AudioSegment> get segments => List.unmodifiable(_segments);
 
+  // Performance metrics getters
+  double get averageConfidence => _confidenceHistory;
+  double get speechActivityRatio => _totalFramesProcessed > 0
+      ? _speechFramesDetected / _totalFramesProcessed
+      : 0.0;
+  int get totalFramesProcessed => _totalFramesProcessed;
+
   // Stream getters
   Stream<double> get audioLevelStream => _audioLevelController.stream;
   Stream<List<double>> get waveformStream => _waveformController.stream;
   Stream<bool> get speechDetectedStream => _speechDetectedController.stream;
+  Stream<String> get transcriptionStream => _transcriptionController.stream;
 
   // Constructor
-  PackageVadService() {
+  PackageVadService({GoogleSTTService? sttService}) {
+    _sttService = sttService;
     _vadHandler = VadHandler.create(isDebug: true);
     _setupVADHandler();
   }
@@ -113,12 +175,19 @@ class PackageVadService extends ChangeNotifier {
               1000;
         }
 
+        // Use actual confidence from VAD model instead of hardcoded value
+        double confidence = _currentConfidence > 0.0 ? _currentConfidence : 0.8;
+
         // Start a new speech segment
-        _startSpeechSegment(0.9, timeFromStart);
+        _startSpeechSegment(confidence, timeFromStart);
 
         // Update state
         _isSpeechDetected = true;
-        _currentConfidence = 0.9; // VAD is confident enough to detect speech
+
+        // Don't override confidence if we already have a good value from frameData
+        if (_currentConfidence < 0.5) {
+          _currentConfidence = confidence;
+        }
 
         // Notify UI
         _speechDetectedController.add(true);
@@ -157,34 +226,36 @@ class PackageVadService extends ChangeNotifier {
       });
 
       _vadHandler.onFrameProcessed?.listen((frameData) {
-        // Update confidence based on speech probability
-        _currentConfidence = frameData.isSpeech;
+        // Update confidence based on actual speech probability from VAD model
+        _currentConfidence = frameData.speechProbability ?? frameData.isSpeech;
+
+        // Track speech activity for adaptive detection
+        _updateSpeechTracking(_currentConfidence);
 
         // Update audio levels for visualization
         final avgLevel = _calculateAudioLevel(frameData.frame);
         _updateAudioLevel(avgLevel);
 
-        // Notify listeners of state changes
-        notifyListeners();
+        // Throttle UI updates to avoid excessive notifyListeners calls
+        final now = DateTime.now();
+        final confidenceChanged =
+            (_currentConfidence - _lastReportedConfidence).abs() >=
+            _confidenceChangeThreshold;
+
+        if (_lastUIUpdate == null ||
+            now.difference(_lastUIUpdate!).inMilliseconds >=
+                _uiUpdateThrottleMs ||
+            confidenceChanged) {
+          _lastUIUpdate = now;
+          _lastReportedConfidence = _currentConfidence;
+          notifyListeners();
+        }
       });
 
       _vadHandler.onVADMisfire?.listen((_) {
         debugPrint('VAD misfire detected.');
-
-        // Add to events but don't change speech detection state
-        _events.add(
-          VADEvent(
-            timestamp: DateTime.now(),
-            isSpeech: false,
-            confidenceScore: 0.3,
-            timeFromStart:
-                DateTime.now()
-                    .difference(_recordingStartTime ?? DateTime.now())
-                    .inMilliseconds /
-                1000,
-          ),
-        );
-
+        // Note: Not adding to events list to avoid double logging
+        // VAD misfires are handled internally and don't need to be tracked as events
         notifyListeners();
       });
 
@@ -200,14 +271,21 @@ class PackageVadService extends ChangeNotifier {
   double _calculateAudioLevel(List<double> audioFrame) {
     if (audioFrame.isEmpty) return 0.0;
 
-    // Calculate average amplitude
-    double sum = 0.0;
+    // Calculate RMS (Root Mean Square) for better level representation
+    double sumOfSquares = 0.0;
     for (var sample in audioFrame) {
-      sum += sample.abs();
+      sumOfSquares += sample * sample;
     }
 
-    // Normalize to 0-100 range for consistency with UI
-    return (sum / audioFrame.length) * 100;
+    double rms = math.sqrt(sumOfSquares / audioFrame.length);
+
+    // Apply logarithmic scaling for better visualization
+    double dbLevel = 20 * math.log(rms + 1e-10) / math.ln10;
+
+    // Normalize to 0-100 range, assuming -60dB to 0dB range
+    double normalizedLevel = ((dbLevel + 60) / 60 * 100).clamp(0.0, 100.0);
+
+    return normalizedLevel;
   }
 
   // Update audio level for visualization
@@ -221,6 +299,63 @@ class PackageVadService extends ChangeNotifier {
     // Send to streams
     _audioLevelController.add(level);
     _waveformController.add(List.from(_audioLevels));
+  }
+
+  // Track speech activity for adaptive detection
+  void _updateSpeechTracking(double confidence) {
+    // Performance monitoring
+    _totalFramesProcessed++;
+    if (confidence > 0.5) {
+      _speechFramesDetected++;
+    }
+
+    // Log performance every 5 seconds
+    final now = DateTime.now();
+    if (_lastPerformanceLog == null ||
+        now.difference(_lastPerformanceLog!).inSeconds >= 5) {
+      _lastPerformanceLog = now;
+      final speechRatio = _totalFramesProcessed > 0
+          ? (_speechFramesDetected / _totalFramesProcessed * 100)
+                .toStringAsFixed(1)
+          : '0.0';
+
+      // Only log if we have significant activity (avoid spam during silence)
+      if (_totalFramesProcessed > 50) {
+        // At least ~1.6 seconds of processing
+        debugPrint(
+          'VAD Performance: ${_totalFramesProcessed} frames, ${speechRatio}% speech, avg confidence: ${_confidenceHistory.toStringAsFixed(2)}',
+        );
+      }
+    }
+
+    // Update confidence history with smoothing
+    _confidenceHistory = (_confidenceHistory * 0.8) + (confidence * 0.2);
+
+    // Track speech activity timing
+    if (confidence > 0.3) {
+      // Consider as speech activity
+      _lastSpeechActivityTime = DateTime.now();
+      _consecutiveLowConfidenceFrames = 0;
+    } else {
+      _consecutiveLowConfidenceFrames++;
+    }
+
+    // Check if we should extend speech detection
+    if (_isSpeechDetected && confidence < 0.2) {
+      // If we're in speech but confidence is very low
+      if (_consecutiveLowConfidenceFrames > _maxLowConfidenceFrames) {
+        // Too many low confidence frames, but check recent activity
+        final timeSinceLastActivity = _lastSpeechActivityTime != null
+            ? DateTime.now().difference(_lastSpeechActivityTime!).inMilliseconds
+            : 1000;
+
+        // If recent activity (within 500ms), keep speech active
+        if (timeSinceLastActivity < 500) {
+          debugPrint('Extending speech detection due to recent activity');
+          _consecutiveLowConfidenceFrames = 0; // Reset counter
+        }
+      }
+    }
   }
 
   // Request necessary permissions
@@ -248,6 +383,17 @@ class PackageVadService extends ChangeNotifier {
       _currentConfidence = 0.0;
       _recordingStartTime = DateTime.now();
 
+      // Reset performance monitoring
+      _totalFramesProcessed = 0;
+      _speechFramesDetected = 0;
+      _lastPerformanceLog = null;
+      _confidenceHistory = 0.0;
+      _consecutiveLowConfidenceFrames = 0;
+
+      // Reset UI throttling
+      _lastUIUpdate = null;
+      _lastReportedConfidence = 0.0;
+
       // Create a temporary recording file
       final tempDir = await getTemporaryDirectory();
       _currentRecordingPath =
@@ -269,11 +415,17 @@ class PackageVadService extends ChangeNotifier {
         model: 'v5',
         // For V5 model, frame samples should be 512 (32ms at 16kHz)
         frameSamples: 512,
-        // Speech probability thresholds
-        positiveSpeechThreshold: 0.5,
-        negativeSpeechThreshold: 0.3,
-        // More aggressive settings for better detection
-        minSpeechFrames: 2,
+        // Speech probability thresholds - made more sensitive for longer segments
+        positiveSpeechThreshold: 0.4, // Lowered from 0.5 for better sensitivity
+        negativeSpeechThreshold: 0.2, // Lowered from 0.3 for longer detection
+        // More conservative settings for longer speech detection
+        minSpeechFrames: 1, // Reduced from 2 for faster detection
+        // Add padding and redemption frames for longer segments
+        preSpeechPadFrames: 2, // Add frames before speech start
+        redemptionFrames:
+            8, // Increased from default (3) to avoid cutting off speech
+        // Don't submit on pause to handle longer segments
+        submitUserSpeechOnPause: false,
       );
 
       // Update state
@@ -385,24 +537,29 @@ class PackageVadService extends ChangeNotifier {
         await sourceFile.copy(segmentPath);
 
         // Add to segments list
-        _segments.add(
-          AudioSegment(
-            id: segmentId,
-            path: segmentPath,
-            startTime: _speechStartTime!,
-            endTime: endTime,
-            confidenceScore: _currentConfidence,
-            duration: Duration(
-              milliseconds: endTime
-                  .difference(_recordingStartTime!)
-                  .inMilliseconds,
-            ),
+        final audioSegment = AudioSegment(
+          id: segmentId,
+          path: segmentPath,
+          startTime: _speechStartTime!,
+          endTime: endTime,
+          confidenceScore: _currentConfidence,
+          duration: Duration(
+            milliseconds: endTime
+                .difference(_recordingStartTime!)
+                .inMilliseconds,
           ),
         );
+
+        _segments.add(audioSegment);
 
         debugPrint(
           'Speech segment ended at ${timeFrom.toStringAsFixed(2)}s and saved to $segmentPath',
         );
+
+        // Process with STT if service is available
+        if (_sttService != null) {
+          _processSegmentWithSTT(audioSegment);
+        }
       }
     } catch (e) {
       debugPrint('Error saving speech segment: $e');
@@ -413,6 +570,45 @@ class PackageVadService extends ChangeNotifier {
 
     // Notify listeners
     notifyListeners();
+  }
+
+  // Process audio segment with Google STT
+  Future<void> _processSegmentWithSTT(AudioSegment segment) async {
+    if (_sttService == null) return;
+
+    try {
+      // Mark segment as processing
+      segment.markProcessingSTT();
+
+      debugPrint('Processing segment ${segment.id} with Google STT...');
+
+      // Send to Google STT API
+      final sttResult = await _sttService!.transcribeAudioSegment(segment.path);
+
+      if (sttResult != null) {
+        // Update segment with transcript
+        segment.updateTranscript(sttResult.transcript, sttResult.confidence);
+
+        debugPrint(
+          'STT Result for ${segment.id}: "${sttResult.transcript}" (confidence: ${sttResult.confidence})',
+        );
+
+        // Emit transcript to stream if not empty
+        if (sttResult.hasText) {
+          _transcriptionController.add(sttResult.transcript);
+        }
+
+        // Notify UI of segment update
+        notifyListeners();
+      } else {
+        // Mark as processed with empty result
+        segment.updateTranscript('', 0.0);
+        debugPrint('STT failed for segment ${segment.id}');
+      }
+    } catch (e) {
+      debugPrint('Error processing segment ${segment.id} with STT: $e');
+      segment.updateTranscript('Error', 0.0);
+    }
   }
 
   // Get current date and time formatted
@@ -436,6 +632,7 @@ class PackageVadService extends ChangeNotifier {
     _audioLevelController.close();
     _waveformController.close();
     _speechDetectedController.close();
+    _transcriptionController.close();
 
     // Dispose of VAD handler
     _vadHandler.dispose();

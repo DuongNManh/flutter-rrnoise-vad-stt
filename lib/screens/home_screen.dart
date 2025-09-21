@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_google_stt/screens/recording_screen.dart';
 import 'package:flutter_google_stt/screens/package_vad_screen.dart';
+import 'package:flutter_google_stt/screens/stt_test_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -85,6 +86,29 @@ class HomeScreen extends StatelessWidget {
                 ),
                 minimumSize: const Size(250, 50),
                 backgroundColor: Colors.purple,
+                foregroundColor: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const STTTestScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.settings),
+              label: const Text('Google STT Setup'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 32,
+                  vertical: 12,
+                ),
+                minimumSize: const Size(250, 50),
+                backgroundColor: Colors.orange,
                 foregroundColor: Colors.white,
               ),
             ),

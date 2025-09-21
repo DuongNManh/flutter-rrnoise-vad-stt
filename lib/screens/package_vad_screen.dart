@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_audio_waveforms/flutter_audio_waveforms.dart';
+import 'package:flutter_google_stt/services/package_vad_service.dart';
+import 'package:flutter_google_stt/widgets/enhanced_waveform.dart';
+import 'package:flutter_google_stt/screens/transcript_screen.dart';
 import 'dart:async';
-import '../services/package_vad_service.dart';
 
 class PackageVADScreen extends StatefulWidget {
   const PackageVADScreen({super.key});
@@ -28,6 +29,11 @@ class _PackageVADScreenState extends State<PackageVADScreen> {
   late final StreamSubscription _waveformSubscription;
   late final StreamSubscription _speechSubscription;
 
+  // Performance optimization
+  DateTime? _lastUIUpdate;
+  final int _uiUpdateThrottleMs = 50; // Match service throttling
+  bool _shouldUpdateWaveform = true;
+
   @override
   void initState() {
     super.initState();
@@ -35,36 +41,49 @@ class _PackageVADScreenState extends State<PackageVADScreen> {
   }
 
   void _setupSubscriptions() {
-    // Listen to audio level changes
+    // Listen to audio level changes with throttling
     _audioLevelSubscription = _vadService.audioLevelStream.listen((level) {
-      setState(() {
-        _audioLevels = List.from(_vadService.audioLevels);
-      });
+      final now = DateTime.now();
+
+      // Throttle UI updates to match service throttling
+      if (_lastUIUpdate == null ||
+          now.difference(_lastUIUpdate!).inMilliseconds >=
+              _uiUpdateThrottleMs) {
+        _lastUIUpdate = now;
+
+        if (mounted && _shouldUpdateWaveform) {
+          setState(() {
+            _audioLevels = List.from(_vadService.audioLevels);
+          });
+        }
+      }
     });
 
-    // Listen to waveform updates
+    // Listen to waveform updates - now using the audio level subscription
     _waveformSubscription = _vadService.waveformStream.listen((waveform) {
-      // This is handled by the audio level subscription already
+      // Redundant with audio level subscription, kept for compatibility
     });
 
     // Listen to speech detection state
     _speechSubscription = _vadService.speechDetectedStream.listen((isSpeech) {
-      setState(() {
-        _isSpeechDetected = isSpeech;
-        _vadEvents = List.from(_vadService.events);
-        _audioSegments = List.from(_vadService.segments);
-        _currentConfidence = _vadService.currentConfidence;
-      });
-
-      // Auto-scroll logs
-      if (_logScrollController.hasClients) {
-        Future.delayed(const Duration(milliseconds: 50), () {
-          _logScrollController.animateTo(
-            _logScrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeOut,
-          );
+      if (mounted) {
+        setState(() {
+          _isSpeechDetected = isSpeech;
+          _vadEvents = List.from(_vadService.events);
+          _audioSegments = List.from(_vadService.segments);
+          _currentConfidence = _vadService.currentConfidence;
         });
+
+        // Auto-scroll logs
+        if (_logScrollController.hasClients) {
+          Future.delayed(const Duration(milliseconds: 50), () {
+            _logScrollController.animateTo(
+              _logScrollController.position.maxScrollExtent,
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOut,
+            );
+          });
+        }
       }
     });
   }
@@ -104,6 +123,21 @@ class _PackageVADScreenState extends State<PackageVADScreen> {
       appBar: AppBar(
         title: const Text('Package-based VAD'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.transcribe),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) =>
+                      TranscriptScreen(vadService: _vadService),
+                ),
+              );
+            },
+            tooltip: 'View Transcripts',
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -187,17 +221,39 @@ class _PackageVADScreenState extends State<PackageVADScreen> {
 
   // Audio waveform visualization
   Widget _buildWaveform() {
+    // Get performance configuration
+    final config = WaveformConfig.getPerformanceConfig();
+
     return Container(
       height: 100,
       padding: const EdgeInsets.symmetric(vertical: 8),
-      child: _audioLevels.isEmpty
+      child: !_shouldUpdateWaveform
+          ? const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.waves, size: 32, color: Colors.grey),
+                  SizedBox(height: 8),
+                  Text(
+                    'Waveform disabled',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ],
+              ),
+            )
+          : _audioLevels.isEmpty
           ? const Center(child: Text('No audio data'))
-          : RectangleWaveform(
-              samples: _normalizeWaveformData(),
+          : EnhancedWaveform(
+              samples: WaveformConfig.optimizeSamples(_normalizeWaveformData()),
               height: 80,
-              width: MediaQuery.of(context).size.width,
-              activeColor: _isSpeechDetected ? Colors.green : Colors.blue,
-              inactiveColor: Colors.grey[300] ?? Colors.grey,
+              width: MediaQuery.of(context).size.width - 32,
+              activeColor: Colors.greenAccent,
+              inactiveColor: Colors.blueAccent,
+              isSpeechDetected: _isSpeechDetected,
+              confidenceLevel: _currentConfidence,
+              enableAnimation: config.enableAnimation,
+              showGradient: config.enableGradient,
+              showSmoothing: config.enableSmoothing,
             ),
     );
   }
@@ -301,20 +357,79 @@ class _PackageVADScreenState extends State<PackageVADScreen> {
   Widget _buildControlPanel() {
     return Container(
       padding: const EdgeInsets.all(16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
+      child: Column(
         children: [
-          ElevatedButton.icon(
-            onPressed: _toggleRecording,
-            icon: Icon(_isRecording ? Icons.stop : Icons.mic),
-            label: Text(_isRecording ? 'Stop' : 'Start Recording'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _isRecording
-                  ? Colors.red
-                  : Theme.of(context).primaryColor,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-            ),
+          // Performance controls
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              // Waveform toggle
+              Column(
+                children: [
+                  Switch(
+                    value: _shouldUpdateWaveform,
+                    onChanged: (value) {
+                      setState(() {
+                        _shouldUpdateWaveform = value;
+                      });
+                    },
+                  ),
+                  const Text('Waveform', style: TextStyle(fontSize: 12)),
+                ],
+              ),
+
+              // Performance info
+              Column(
+                children: [
+                  Text(
+                    'Confidence: ${_currentConfidence.toStringAsFixed(2)}',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  Text(
+                    'Frames: ${_vadService.totalFramesProcessed}',
+                    style: const TextStyle(fontSize: 10, color: Colors.grey),
+                  ),
+                ],
+              ),
+
+              // Speech ratio
+              Column(
+                children: [
+                  Text(
+                    'Speech: ${(_vadService.speechActivityRatio * 100).toStringAsFixed(1)}%',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  Text(
+                    'Avg Conf: ${_vadService.averageConfidence.toStringAsFixed(2)}',
+                    style: const TextStyle(fontSize: 10, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 16),
+
+          // Recording control
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton.icon(
+                onPressed: _toggleRecording,
+                icon: Icon(_isRecording ? Icons.stop : Icons.mic),
+                label: Text(_isRecording ? 'Stop' : 'Start Recording'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _isRecording
+                      ? Colors.red
+                      : Theme.of(context).primaryColor,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 32,
+                    vertical: 16,
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),

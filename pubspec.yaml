@@ -32,6 +32,7 @@ dependencies:
     sdk: flutter
   googleapis: ^11.0.0  # Google APIs client
   googleapis_auth: ^1.4.0  # Auth handling
+  http: ^1.2.0  # HTTP client for API calls
   record: ^6.1.1  # Audio recording (cập nhật phiên bản để phù hợp với vad 0.0.6)
   path_provider: ^2.0.15  # File handling
   audioplayers: ^5.2.1  # Để play lại audio đã record
