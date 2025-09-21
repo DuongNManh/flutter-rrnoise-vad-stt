@@ -1,17 +1,17 @@
-/// API Keys Configuration
-/// IMPORTANT: Never commit real API keys to version control!
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+
 class ApiKeys {
-  // Replace with your actual Google Cloud Speech-to-Text API key
-  static const String googleSpeechApiKey = 'YOUR_GOOGLE_SPEECH_API_KEY_HERE';
+  static String get googleSpeechApiKey =>
+      dotenv.env['GG_KEY'] ?? 'YOUR_KEY_HERE';
 
   // Check if API key is configured
   static bool get isConfigured =>
-      googleSpeechApiKey != 'YOUR_GOOGLE_SPEECH_API_KEY_HERE';
+      googleSpeechApiKey != 'YOUR_KEY_HERE' && googleSpeechApiKey.isNotEmpty;
 
   // Get API key with validation
   static String? get speechApiKey {
     if (!isConfigured) {
-      print('WARNING: Google Speech API key not configured!');
+      print('WARNING: Google Speech API key not configured in .env file!');
       return null;
     }
     return googleSpeechApiKey;

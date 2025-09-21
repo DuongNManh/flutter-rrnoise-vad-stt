@@ -1,7 +1,8 @@
+import 'api_keys.dart';
+
 class AppConfig {
   // Google Speech-to-Text API Configuration
-  static const String googleSTTApiKey =
-      'YOUR_API_KEY_HERE'; // Thay bằng API key thật
+  static String get googleSTTApiKey => ApiKeys.googleSpeechApiKey;
 
   // Language configuration
   static const String defaultLanguage = 'vi-VN'; // Vietnamese

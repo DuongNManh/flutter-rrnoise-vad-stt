@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_google_stt/services/package_vad_service.dart';
-import 'package:flutter_google_stt/services/google_stt_service.dart';
 import 'dart:async';
 
 class TranscriptScreen extends StatefulWidget {

@@ -7,8 +7,12 @@ class STTTestService {
 
   /// Initialize STT service with API key
   static void initialize() {
-    if (AppConfig.googleSTTApiKey != 'YOUR_API_KEY_HERE') {
+    if (AppConfig.googleSTTApiKey.isNotEmpty &&
+        AppConfig.googleSTTApiKey != 'YOUR_GOOGLE_SPEECH_API_KEY_HERE') {
       _sttService = GoogleSTTService(AppConfig.googleSTTApiKey);
+      debugPrint('STT Service initialized with API key');
+    } else {
+      debugPrint('Failed to initialize STT Service: Invalid API key');
     }
   }
 
@@ -37,28 +41,13 @@ class STTTestService {
 
   /// Show configuration status
   static String getConfigStatus() {
-    if (AppConfig.googleSTTApiKey == 'YOUR_API_KEY_HERE') {
+    if (AppConfig.googleSTTApiKey.isEmpty ||
+        AppConfig.googleSTTApiKey == 'YOUR_KEY_HERE') {
       return '❌ API Key not configured';
     } else if (!isAvailable) {
       return '⚠️ STT Service initialization failed';
     } else {
       return '✅ STT Service ready';
     }
-  }
-
-  /// Show instructions for setup
-  static String getSetupInstructions() {
-    return '''
-📝 Setup Instructions:
-
-1. Go to Google Cloud Console
-2. Enable "Cloud Speech-to-Text API"
-3. Create API Key in Credentials
-4. Copy your API key
-5. Replace 'YOUR_API_KEY_HERE' in app_config.dart
-6. Restart the app
-
-Current status: ${getConfigStatus()}
-''';
   }
 }

@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'screens/home_screen.dart';
 import 'services/stt_test_service.dart';
 
 void main() async {
   // Ensure Flutter is initialized
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // Load .env file
+  await dotenv.load(fileName: ".env");
 
   // Request permissions needed for WebRTC and audio recording
   await [

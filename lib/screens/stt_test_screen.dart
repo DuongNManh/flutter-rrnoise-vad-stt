@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_google_stt/services/google_stt_service.dart';
-import '../services/stt_test_service.dart';
-import '../config/app_config.dart';
+import '../config/api_keys.dart';
 
 class STTTestScreen extends StatefulWidget {
   const STTTestScreen({super.key});

@@ -197,8 +197,8 @@ class PackageVadService extends ChangeNotifier {
       _vadHandler.onRealSpeechStart?.listen((_) {
         debugPrint('Real speech start detected (not a misfire).');
 
-        // Update confidence to maximum
-        _currentConfidence = 1.0;
+        // Không ghi đè _currentConfidence với giá trị cứng
+        // Để nó nhận giá trị từ frameData.isSpeech trong onFrameProcessed
         notifyListeners();
       });
 
@@ -218,7 +218,8 @@ class PackageVadService extends ChangeNotifier {
 
         // Update state
         _isSpeechDetected = false;
-        _currentConfidence = 0.1; // Reset confidence when speech ends
+        // Không đặt lại _currentConfidence thành giá trị cố định
+        // Để nó tiếp tục được cập nhật từ frameData.isSpeech
 
         // Notify UI
         _speechDetectedController.add(false);
@@ -227,7 +228,8 @@ class PackageVadService extends ChangeNotifier {
 
       _vadHandler.onFrameProcessed?.listen((frameData) {
         // Update confidence based on actual speech probability from VAD model
-        _currentConfidence = frameData.speechProbability ?? frameData.isSpeech;
+        // Trong phiên bản VAD 0.0.6, API đã thay đổi từ speechProbability sang isSpeech
+        _currentConfidence = frameData.isSpeech;
 
         // Track speech activity for adaptive detection
         _updateSpeechTracking(_currentConfidence);
