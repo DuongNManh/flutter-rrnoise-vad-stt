@@ -8,7 +8,7 @@ class STTTestService {
   /// Initialize STT service with API key
   static void initialize() {
     if (AppConfig.googleSTTApiKey.isNotEmpty &&
-        AppConfig.googleSTTApiKey != 'YOUR_GOOGLE_SPEECH_API_KEY_HERE') {
+        AppConfig.googleSTTApiKey != 'YOUR_KEY_HERE') {
       _sttService = GoogleSTTService(AppConfig.googleSTTApiKey);
       debugPrint('STT Service initialized with API key');
     } else {
