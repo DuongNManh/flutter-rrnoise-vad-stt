@@ -8,7 +8,7 @@ import 'services/stt_test_service.dart';
 void main() async {
   // Ensure Flutter is initialized
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   // Load .env file
   await dotenv.load(fileName: ".env");
 

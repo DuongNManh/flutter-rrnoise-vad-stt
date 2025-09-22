@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_google_stt/screens/recording_screen.dart';
-import 'package:flutter_google_stt/screens/package_vad_screen.dart';
 import 'package:flutter_google_stt/screens/stt_test_screen.dart';
+import 'package:flutter_google_stt/screens/voice_recording_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -65,27 +65,24 @@ class HomeScreen extends StatelessWidget {
             ),
             const SizedBox(height: 20),
 
-            // Removed simulated VAD demo button
-            const SizedBox(height: 20),
-
             ElevatedButton.icon(
               onPressed: () {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => const PackageVADScreen(),
+                    builder: (context) => const VoiceRecordingScreen(),
                   ),
                 );
               },
-              icon: const Icon(Icons.voice_chat),
-              label: const Text('Package-based VAD'),
+              icon: const Icon(Icons.play_circle),
+              label: const Text('Voice Recording Test'),
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 32,
                   vertical: 12,
                 ),
                 minimumSize: const Size(250, 50),
-                backgroundColor: Colors.purple,
+                backgroundColor: Colors.green,
                 foregroundColor: Colors.white,
               ),
             ),

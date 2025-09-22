@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
@@ -15,6 +16,72 @@ class GoogleSTTService {
   static final http.Client _httpClient = http.Client();
 
   GoogleSTTService(this._apiKey);
+
+  /// Transcribe audio buffer directly to text using Google Speech-to-Text API
+  /// Phương thức này xử lý trực tiếp dữ liệu audio từ buffer thay vì file
+  Future<STTResult?> transcribeAudioBuffer(
+    Uint8List audioBuffer, {
+    String? audioFormat = 'LINEAR16',
+    int sampleRate = 16000,
+    String debugName = 'buffer',
+  }) async {
+    // Check if API key is valid
+    if (_apiKey.isEmpty || _apiKey == 'YOUR_KEY_HERE') {
+      if (kDebugMode) {
+        print('STT Error: Invalid API key');
+      }
+      return null;
+    }
+    try {
+      // Kiểm tra buffer có hợp lệ không
+      if (audioBuffer.isEmpty) {
+        if (kDebugMode) {
+          print('STT Error: Audio buffer is empty');
+        }
+        return null;
+      }
+
+      // Kiểm tra buffer size - nếu quá lớn thì báo lỗi
+      if (audioBuffer.length > 10 * 1024 * 1024) {
+        // 10MB limit
+        if (kDebugMode) {
+          print(
+            'STT Error: Audio buffer too large: ${audioBuffer.length} bytes',
+          );
+        }
+        return null;
+      }
+
+      // Add logging to help diagnose issues
+      if (kDebugMode) {
+        if (audioBuffer.length < 1000) {
+          print(
+            '⚠️ Warning: Audio buffer is very small (${audioBuffer.length} bytes), may not contain speech',
+          );
+        }
+
+        print(
+          'Processing audio buffer ($debugName): ${audioBuffer.length} bytes',
+        );
+      }
+
+      // Chạy STT processing trong compute isolate để không block UI
+      final result = await compute(_transcribeBufferInIsolate, {
+        'audioBytes': audioBuffer,
+        'apiKey': _apiKey,
+        'audioFormat': audioFormat,
+        'sampleRate': sampleRate,
+      });
+
+      return result;
+    } catch (e, stackTrace) {
+      if (kDebugMode) {
+        print('STT Buffer Exception: $e');
+        print('Stack trace: $stackTrace');
+      }
+      return null;
+    }
+  }
 
   /// Transcribe audio file to text using Google Speech-to-Text API
   /// Sử dụng isolate để không block UI thread
@@ -41,6 +108,15 @@ class GoogleSTTService {
         return null;
       }
 
+      // Add logging to help diagnose issues
+      if (kDebugMode) {
+        if (audioBytes.length < 1000) {
+          print(
+            '⚠️ Warning: Audio file is very small (${audioBytes.length} bytes), may not contain speech',
+          );
+        }
+      }
+
       // Chạy STT processing trong compute isolate để không block UI
       final result = await compute(_transcribeInIsolate, {
         'audioBytes': audioBytes,
@@ -53,6 +129,142 @@ class GoogleSTTService {
       if (kDebugMode) {
         print('STT Exception: $e');
         print('Stack trace: $stackTrace');
+      }
+      return null;
+    }
+  }
+
+  /// Static method để xử lý buffer âm thanh trong isolate
+  static Future<STTResult?> _transcribeBufferInIsolate(
+    Map<String, dynamic> params,
+  ) async {
+    try {
+      final Uint8List audioBytes = params['audioBytes'];
+      final String apiKey = params['apiKey'];
+      final String audioFormat = params['audioFormat'] ?? 'LINEAR16';
+      final int sampleRate = params['sampleRate'] ?? 16000;
+
+      // Convert to base64 trong isolate
+      final audioBase64 = base64Encode(audioBytes);
+
+      final requestBody = {
+        'config': {
+          'encoding': audioFormat,
+          'sampleRateHertz': sampleRate,
+          'languageCode': 'en-US',
+          'alternativeLanguageCodes': ['vi-VN'],
+          'enableAutomaticPunctuation': true,
+          'model': 'latest_short',
+          'useEnhanced': true,
+          'maxAlternatives': 1,
+          'profanityFilter': false,
+          // Thêm timeout để tránh request bị treo
+          'speechContexts': [],
+        },
+        'audio': {'content': audioBase64},
+      };
+
+      // Log request details in debug mode
+      if (kDebugMode) {
+        print(
+          'STT Buffer Request: Audio format: $audioFormat, size: ${audioBytes.length} bytes',
+        );
+      }
+
+      // Sử dụng timeout cho HTTP request
+      final response = await http
+          .post(
+            Uri.parse('$_baseUrl?key=$apiKey'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+              'User-Agent': 'Flutter-STT-Client/1.0',
+            },
+            body: jsonEncode(requestBody),
+          )
+          .timeout(
+            const Duration(seconds: 30), // Timeout sau 30 giây
+            onTimeout: () {
+              throw TimeoutException(
+                'STT API request timed out',
+                const Duration(seconds: 30),
+              );
+            },
+          );
+
+      if (response.statusCode == 200) {
+        final result = jsonDecode(response.body);
+
+        if (result['results'] != null && result['results'].isNotEmpty) {
+          final firstResult = result['results'][0];
+          final alternative = firstResult['alternatives'][0];
+
+          return STTResult(
+            transcript: alternative['transcript'] ?? '',
+            confidence: (alternative['confidence'] ?? 0.0).toDouble(),
+            audioLength: _calculateAudioLengthStatic(audioBytes),
+          );
+        } else {
+          if (kDebugMode) {
+            print('STT: No speech detected in audio buffer');
+            // Calculate approximate speech level in dB
+            double sumOfSquares = 0.0;
+            final sampleStep = audioBytes.length > 1000
+                ? audioBytes.length ~/ 1000
+                : 1;
+            int samplesCount = 0;
+
+            // For WAV, skip header - in general buffer case, check first few bytes to see if it's a WAV header
+            bool isWav =
+                audioBytes.length > 44 &&
+                String.fromCharCodes(audioBytes.sublist(0, 4)) == 'RIFF' &&
+                String.fromCharCodes(audioBytes.sublist(8, 12)) == 'WAVE';
+            int startOffset = isWav ? 44 : 0;
+
+            for (
+              int i = startOffset;
+              i < audioBytes.length;
+              i += sampleStep * 2
+            ) {
+              if (i + 1 < audioBytes.length) {
+                final sample = audioBytes[i] | (audioBytes[i + 1] << 8);
+                final normalizedSample = (sample < 32768)
+                    ? sample
+                    : sample - 65536;
+                sumOfSquares += normalizedSample * normalizedSample;
+                samplesCount++;
+              }
+            }
+
+            if (samplesCount > 0) {
+              final rms = math.sqrt(sumOfSquares / samplesCount);
+              final db = 20 * math.log(rms > 0 ? rms : 1) / math.ln10;
+              print(
+                'Audio buffer level: ${db.toStringAsFixed(2)} dB, Size: ${audioBytes.length} bytes',
+              );
+            }
+          }
+
+          return STTResult(
+            transcript: '',
+            confidence: 0.0,
+            audioLength: _calculateAudioLengthStatic(audioBytes),
+          );
+        }
+      } else {
+        // Log lỗi API một cách có control
+        if (kDebugMode) {
+          print('STT API Error: ${response.statusCode}');
+          // Chỉ log response body nếu không quá dài
+          if (response.body.length < 500) {
+            print('Response: ${response.body}');
+          }
+        }
+        return null;
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('STT Buffer Isolate Exception: $e');
       }
       return null;
     }
@@ -87,6 +299,13 @@ class GoogleSTTService {
         },
         'audio': {'content': audioBase64},
       };
+
+      // Log request details in debug mode
+      if (kDebugMode) {
+        print(
+          'STT Request: Audio format: $audioFormat, size: ${audioBytes.length} bytes',
+        );
+      }
 
       // Sử dụng timeout cho HTTP request
       final response = await http
@@ -125,6 +344,36 @@ class GoogleSTTService {
           if (kDebugMode) {
             print('STT: No speech detected in audio segment');
           }
+          if (kDebugMode) {
+            print('STT API Response: No speech detected in audio segment');
+            // Calculate approximate speech level in dB
+            double sumOfSquares = 0.0;
+            final sampleStep = audioBytes.length > 1000
+                ? audioBytes.length ~/ 1000
+                : 1;
+            int samplesCount = 0;
+
+            for (int i = 44; i < audioBytes.length; i += sampleStep * 2) {
+              // Skip WAV header (44 bytes)
+              if (i + 1 < audioBytes.length) {
+                final sample = audioBytes[i] | (audioBytes[i + 1] << 8);
+                final normalizedSample = (sample < 32768)
+                    ? sample
+                    : sample - 65536;
+                sumOfSquares += normalizedSample * normalizedSample;
+                samplesCount++;
+              }
+            }
+
+            if (samplesCount > 0) {
+              final rms = math.sqrt(sumOfSquares / samplesCount);
+              final db = 20 * math.log(rms > 0 ? rms : 1) / math.ln10;
+              print(
+                'Audio level: ${db.toStringAsFixed(2)} dB, File size: ${audioBytes.length} bytes',
+              );
+            }
+          }
+
           return STTResult(
             transcript: '',
             confidence: 0.0,
