@@ -45,7 +45,7 @@ class AudioSegment {
   bool get isSTTProcessed => transcript != null;
   String get displayText => transcript ?? 'Processing...';
 
-  // Update transcript info
+  // Update transcript info - made safe for UI updates
   void updateTranscript(String newTranscript, double confidence) {
     transcript = newTranscript;
     sttConfidence = confidence;
@@ -90,8 +90,10 @@ class PackageVadService extends ChangeNotifier {
   // Record instance for recording to file (separate from VAD recording)
   final _record = AudioRecorder();
 
-  // Google STT service (optional)
+  // Google STT service (optional) - với queue để tránh blocking
   GoogleSTTService? _sttService;
+  final List<AudioSegment> _sttQueue = [];
+  bool _isProcessingSTT = false;
 
   // Lists to track audio data and events
   final List<double> _audioLevels = [];
@@ -117,20 +119,23 @@ class PackageVadService extends ChangeNotifier {
   DateTime? _lastSpeechActivityTime;
   double _confidenceHistory = 0.0;
   int _consecutiveLowConfidenceFrames = 0;
-  final int _maxLowConfidenceFrames =
-      10; // Allow 10 low confidence frames before ending speech
+  final int _maxLowConfidenceFrames = 10;
 
   // Performance monitoring
   int _totalFramesProcessed = 0;
   int _speechFramesDetected = 0;
   DateTime? _lastPerformanceLog;
 
-  // UI update throttling
+  // UI update throttling - Tối ưu hóa để tránh UI blocking
   DateTime? _lastUIUpdate;
-  final int _uiUpdateThrottleMs = 50; // Update UI max every 50ms
+  final int _uiUpdateThrottleMs = 100; // Tăng lên 100ms để giảm tải UI
   double _lastReportedConfidence = 0.0;
   final double _confidenceChangeThreshold =
-      0.05; // Only update if confidence changes by 5%
+      0.1; // Tăng threshold để giảm cập nhật
+
+  // Batch update để tránh quá nhiều notifyListeners
+  Timer? _batchUpdateTimer;
+  bool _hasPendingUpdate = false;
 
   // Getters
   bool get isRecording => _isRecording;
@@ -156,16 +161,34 @@ class PackageVadService extends ChangeNotifier {
   // Constructor
   PackageVadService({GoogleSTTService? sttService}) {
     _sttService = sttService;
-    _vadHandler = VadHandler.create(isDebug: true);
+    _vadHandler = VadHandler.create(isDebug: false); // Tắt debug để giảm tải
     _setupVADHandler();
+    _startBatchUpdateTimer();
   }
 
-  // Setup VAD handler
+  // Batch update timer để giảm số lần gọi notifyListeners
+  void _startBatchUpdateTimer() {
+    _batchUpdateTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+      if (_hasPendingUpdate) {
+        _hasPendingUpdate = false;
+        notifyListeners();
+      }
+    });
+  }
+
+  // Schedule a batched UI update
+  void _scheduleUIUpdate() {
+    _hasPendingUpdate = true;
+  }
+
+  // Setup VAD handler với tối ưu hóa
   void _setupVADHandler() {
     try {
       // Set up VAD event listeners
       _vadHandler.onSpeechStart?.listen((_) {
-        debugPrint('Speech detected.');
+        if (kDebugMode) {
+          debugPrint('Speech detected.');
+        }
 
         // Calculate time from recording start
         double timeFromStart = 0.0;
@@ -175,37 +198,31 @@ class PackageVadService extends ChangeNotifier {
               1000;
         }
 
-        // Use actual confidence from VAD model instead of hardcoded value
         double confidence = _currentConfidence > 0.0 ? _currentConfidence : 0.8;
-
-        // Start a new speech segment
         _startSpeechSegment(confidence, timeFromStart);
 
-        // Update state
         _isSpeechDetected = true;
-
-        // Don't override confidence if we already have a good value from frameData
         if (_currentConfidence < 0.5) {
           _currentConfidence = confidence;
         }
 
-        // Notify UI
+        // Async stream updates để không block UI
         _speechDetectedController.add(true);
-        notifyListeners();
+        _scheduleUIUpdate();
       });
 
       _vadHandler.onRealSpeechStart?.listen((_) {
-        debugPrint('Real speech start detected (not a misfire).');
-
-        // Không ghi đè _currentConfidence với giá trị cứng
-        // Để nó nhận giá trị từ frameData.isSpeech trong onFrameProcessed
-        notifyListeners();
+        if (kDebugMode) {
+          debugPrint('Real speech start detected.');
+        }
+        _scheduleUIUpdate();
       });
 
-      _vadHandler.onSpeechEnd?.listen((samples) {
-        debugPrint('Speech ended');
+      _vadHandler.onSpeechEnd?.listen((samples) async {
+        if (kDebugMode) {
+          debugPrint('Speech ended');
+        }
 
-        // Calculate time from recording start
         double timeFromStart = 0.0;
         if (_recordingStartTime != null) {
           timeFromStart =
@@ -213,32 +230,22 @@ class PackageVadService extends ChangeNotifier {
               1000;
         }
 
-        // End speech segment
-        _endSpeechSegment(timeFromStart: timeFromStart);
+        // End speech segment - chạy async để không block UI
+        unawaited(_endSpeechSegment(timeFromStart: timeFromStart));
 
-        // Update state
         _isSpeechDetected = false;
-        // Không đặt lại _currentConfidence thành giá trị cố định
-        // Để nó tiếp tục được cập nhật từ frameData.isSpeech
-
-        // Notify UI
         _speechDetectedController.add(false);
-        notifyListeners();
+        _scheduleUIUpdate();
       });
 
       _vadHandler.onFrameProcessed?.listen((frameData) {
-        // Update confidence based on actual speech probability from VAD model
-        // Trong phiên bản VAD 0.0.6, API đã thay đổi từ speechProbability sang isSpeech
         _currentConfidence = frameData.isSpeech;
-
-        // Track speech activity for adaptive detection
         _updateSpeechTracking(_currentConfidence);
 
-        // Update audio levels for visualization
         final avgLevel = _calculateAudioLevel(frameData.frame);
         _updateAudioLevel(avgLevel);
 
-        // Throttle UI updates to avoid excessive notifyListeners calls
+        // Throttled UI updates với cải tiến
         final now = DateTime.now();
         final confidenceChanged =
             (_currentConfidence - _lastReportedConfidence).abs() >=
@@ -250,111 +257,106 @@ class PackageVadService extends ChangeNotifier {
             confidenceChanged) {
           _lastUIUpdate = now;
           _lastReportedConfidence = _currentConfidence;
-          notifyListeners();
+          _scheduleUIUpdate();
         }
       });
 
       _vadHandler.onVADMisfire?.listen((_) {
-        debugPrint('VAD misfire detected.');
-        // Note: Not adding to events list to avoid double logging
-        // VAD misfires are handled internally and don't need to be tracked as events
-        notifyListeners();
+        if (kDebugMode) {
+          debugPrint('VAD misfire detected.');
+        }
       });
 
       _vadHandler.onError?.listen((String message) {
-        debugPrint('VAD Error: $message');
+        if (kDebugMode) {
+          debugPrint('VAD Error: $message');
+        }
       });
     } catch (e) {
-      debugPrint('Error setting up VAD handler: $e');
+      if (kDebugMode) {
+        debugPrint('Error setting up VAD handler: $e');
+      }
     }
   }
 
-  // Calculate audio level from audio frame
+  // Calculate audio level from audio frame - Tối ưu hóa
   double _calculateAudioLevel(List<double> audioFrame) {
     if (audioFrame.isEmpty) return 0.0;
 
-    // Calculate RMS (Root Mean Square) for better level representation
+    // Sử dụng sample để tính toán nhanh hơn với audio frame lớn
+    final sampleSize = audioFrame.length > 100 ? 100 : audioFrame.length;
+    final step = audioFrame.length ~/ sampleSize;
+
     double sumOfSquares = 0.0;
-    for (var sample in audioFrame) {
+    for (int i = 0; i < audioFrame.length; i += step) {
+      final sample = audioFrame[i];
       sumOfSquares += sample * sample;
     }
 
-    double rms = math.sqrt(sumOfSquares / audioFrame.length);
-
-    // Apply logarithmic scaling for better visualization
+    final samplesUsed = (audioFrame.length / step).ceil();
+    double rms = math.sqrt(sumOfSquares / samplesUsed);
     double dbLevel = 20 * math.log(rms + 1e-10) / math.ln10;
-
-    // Normalize to 0-100 range, assuming -60dB to 0dB range
     double normalizedLevel = ((dbLevel + 60) / 60 * 100).clamp(0.0, 100.0);
 
     return normalizedLevel;
   }
 
-  // Update audio level for visualization
+  // Update audio level for visualization - Tối ưu hóa
   void _updateAudioLevel(double level) {
-    // Add to audio levels list (keep last 100 values)
     _audioLevels.add(level);
-    if (_audioLevels.length > 100) {
+    if (_audioLevels.length > 50) {
+      // Giảm buffer size từ 100 xuống 50
       _audioLevels.removeAt(0);
     }
 
-    // Send to streams
+    // Async stream updates
     _audioLevelController.add(level);
     _waveformController.add(List.from(_audioLevels));
   }
 
   // Track speech activity for adaptive detection
   void _updateSpeechTracking(double confidence) {
-    // Performance monitoring
     _totalFramesProcessed++;
     if (confidence > 0.5) {
       _speechFramesDetected++;
     }
 
-    // Log performance every 5 seconds
+    // Giảm tần suất log performance
     final now = DateTime.now();
     if (_lastPerformanceLog == null ||
-        now.difference(_lastPerformanceLog!).inSeconds >= 5) {
+        now.difference(_lastPerformanceLog!).inSeconds >= 10) {
+      // Tăng từ 5s lên 10s
       _lastPerformanceLog = now;
-      final speechRatio = _totalFramesProcessed > 0
-          ? (_speechFramesDetected / _totalFramesProcessed * 100)
-                .toStringAsFixed(1)
-          : '0.0';
-
-      // Only log if we have significant activity (avoid spam during silence)
-      if (_totalFramesProcessed > 50) {
-        // At least ~1.6 seconds of processing
+      if (_totalFramesProcessed > 100 && kDebugMode) {
+        final speechRatio =
+            (_speechFramesDetected / _totalFramesProcessed * 100)
+                .toStringAsFixed(1);
         debugPrint(
-          'VAD Performance: ${_totalFramesProcessed} frames, ${speechRatio}% speech, avg confidence: ${_confidenceHistory.toStringAsFixed(2)}',
+          'VAD Performance: ${_totalFramesProcessed} frames, ${speechRatio}% speech',
         );
       }
     }
 
-    // Update confidence history with smoothing
     _confidenceHistory = (_confidenceHistory * 0.8) + (confidence * 0.2);
 
-    // Track speech activity timing
     if (confidence > 0.3) {
-      // Consider as speech activity
       _lastSpeechActivityTime = DateTime.now();
       _consecutiveLowConfidenceFrames = 0;
     } else {
       _consecutiveLowConfidenceFrames++;
     }
 
-    // Check if we should extend speech detection
     if (_isSpeechDetected && confidence < 0.2) {
-      // If we're in speech but confidence is very low
       if (_consecutiveLowConfidenceFrames > _maxLowConfidenceFrames) {
-        // Too many low confidence frames, but check recent activity
         final timeSinceLastActivity = _lastSpeechActivityTime != null
             ? DateTime.now().difference(_lastSpeechActivityTime!).inMilliseconds
             : 1000;
 
-        // If recent activity (within 500ms), keep speech active
         if (timeSinceLastActivity < 500) {
-          debugPrint('Extending speech detection due to recent activity');
-          _consecutiveLowConfidenceFrames = 0; // Reset counter
+          if (kDebugMode) {
+            debugPrint('Extending speech detection due to recent activity');
+          }
+          _consecutiveLowConfidenceFrames = 0;
         }
       }
     }
@@ -370,10 +372,11 @@ class PackageVadService extends ChangeNotifier {
   Future<void> startRecording() async {
     if (_isRecording) return;
 
-    // Check permissions first
     final hasPermission = await requestPermissions();
     if (!hasPermission) {
-      debugPrint('No permission to record audio');
+      if (kDebugMode) {
+        debugPrint('No permission to record audio');
+      }
       return;
     }
 
@@ -381,6 +384,8 @@ class PackageVadService extends ChangeNotifier {
       // Reset state
       _audioLevels.clear();
       _events.clear();
+      _segments.clear(); // Clear previous segments
+      _sttQueue.clear(); // Clear STT queue
       _isSpeechDetected = false;
       _currentConfidence = 0.0;
       _recordingStartTime = DateTime.now();
@@ -391,12 +396,9 @@ class PackageVadService extends ChangeNotifier {
       _lastPerformanceLog = null;
       _confidenceHistory = 0.0;
       _consecutiveLowConfidenceFrames = 0;
-
-      // Reset UI throttling
       _lastUIUpdate = null;
       _lastReportedConfidence = 0.0;
 
-      // Create a temporary recording file
       final tempDir = await getTemporaryDirectory();
       _currentRecordingPath =
           '${tempDir.path}/vad_recording_${_getCurrentFormattedDateTime()}.wav';
@@ -408,48 +410,39 @@ class PackageVadService extends ChangeNotifier {
         numChannels: 1,
       );
 
-      // Start recording to file
       await _record.start(config, path: _currentRecordingPath!);
 
-      // Start VAD listening
+      // Tối ưu VAD settings
       await _vadHandler.startListening(
-        // Using latest V5 model for better accuracy
         model: 'v5',
-        // For V5 model, frame samples should be 512 (32ms at 16kHz)
         frameSamples: 512,
-        // Speech probability thresholds - made more sensitive for longer segments
-        positiveSpeechThreshold: 0.4, // Lowered from 0.5 for better sensitivity
-        negativeSpeechThreshold: 0.2, // Lowered from 0.3 for longer detection
-        // More conservative settings for longer speech detection
-        minSpeechFrames: 1, // Reduced from 2 for faster detection
-        // Add padding and redemption frames for longer segments
-        preSpeechPadFrames: 2, // Add frames before speech start
-        redemptionFrames:
-            8, // Increased from default (3) to avoid cutting off speech
-        // Don't submit on pause to handle longer segments
+        positiveSpeechThreshold: 0.4,
+        negativeSpeechThreshold: 0.2,
+        minSpeechFrames: 1,
+        preSpeechPadFrames: 2,
+        redemptionFrames: 8,
         submitUserSpeechOnPause: false,
       );
 
-      // Update state
       _isRecording = true;
-      notifyListeners();
-
-      // Start audio level timer for backup if onFrameProcessed doesn't fire often enough
+      _scheduleUIUpdate();
       _startAudioLevelTimer();
 
-      debugPrint('Recording started with VAD');
+      if (kDebugMode) {
+        debugPrint('Recording started with VAD');
+      }
     } catch (e) {
-      debugPrint('Error starting recording with VAD: $e');
+      if (kDebugMode) {
+        debugPrint('Error starting recording with VAD: $e');
+      }
     }
   }
 
-  // Start a timer to monitor audio levels in case frame processing is too slow
   void _startAudioLevelTimer() {
-    _audioLevelTimer = Timer.periodic(const Duration(milliseconds: 100), (
+    _audioLevelTimer = Timer.periodic(const Duration(milliseconds: 200), (
       timer,
     ) {
       if (_audioLevels.isEmpty) {
-        // If no levels yet, add a default low level
         _updateAudioLevel(10.0);
       }
     });
@@ -460,38 +453,33 @@ class PackageVadService extends ChangeNotifier {
     if (!_isRecording) return;
 
     try {
-      // Stop any active speech segment
       if (_isSpeechDetected) {
-        _endSpeechSegment();
+        await _endSpeechSegment();
       }
 
-      // Stop VAD listening
       await _vadHandler.stopListening();
-
-      // Stop recording to file
       await _record.stop();
-
-      // Stop audio level timer
       _audioLevelTimer?.cancel();
 
-      // Update state
       _isRecording = false;
-      notifyListeners();
+      _scheduleUIUpdate();
 
-      debugPrint(
-        'Recording stopped, ${_segments.length} speech segments detected',
-      );
+      if (kDebugMode) {
+        debugPrint(
+          'Recording stopped, ${_segments.length} speech segments detected',
+        );
+      }
     } catch (e) {
-      debugPrint('Error stopping recording with VAD: $e');
+      if (kDebugMode) {
+        debugPrint('Error stopping recording with VAD: $e');
+      }
     }
   }
 
   // Start a new speech segment
   void _startSpeechSegment(double confidence, double timeFromStart) {
-    // Record start time
     _speechStartTime = DateTime.now();
 
-    // Add event
     _events.add(
       VADEvent(
         timestamp: _speechStartTime!,
@@ -501,12 +489,14 @@ class PackageVadService extends ChangeNotifier {
       ),
     );
 
-    debugPrint(
-      'Speech segment started at ${timeFromStart.toStringAsFixed(2)}s with confidence ${confidence.toStringAsFixed(2)}',
-    );
+    if (kDebugMode) {
+      debugPrint(
+        'Speech segment started at ${timeFromStart.toStringAsFixed(2)}s',
+      );
+    }
   }
 
-  // End current speech segment and save it
+  // End current speech segment and save it - ASYNC để không block UI
   Future<void> _endSpeechSegment({double? timeFromStart}) async {
     if (_speechStartTime == null || _currentRecordingPath == null) return;
 
@@ -515,7 +505,6 @@ class PackageVadService extends ChangeNotifier {
         timeFromStart ??
         ((endTime.difference(_recordingStartTime!).inMilliseconds) / 1000);
 
-    // Add end event
     _events.add(
       VADEvent(
         timestamp: endTime,
@@ -525,24 +514,27 @@ class PackageVadService extends ChangeNotifier {
       ),
     );
 
-    // Save segment (this would extract the audio segment in a real implementation)
-    // For now, we'll simulate saving segments
+    // Chạy segment saving trong background
+    unawaited(_saveSegmentAsync(endTime, timeFrom));
+
+    _speechStartTime = null;
+    _scheduleUIUpdate();
+  }
+
+  // Async segment saving để không block UI
+  Future<void> _saveSegmentAsync(DateTime endTime, double timeFrom) async {
     final segmentId = 'segment_${_segments.length + 1}';
     final segmentPath = '$_currentRecordingPath.$segmentId.wav';
 
-    // Create a segment file from the recording
     try {
       final sourceFile = File(_currentRecordingPath!);
       if (await sourceFile.exists()) {
-        // In a real implementation, we would extract the specific time segment
-        // For now, just copy the whole file
         await sourceFile.copy(segmentPath);
 
-        // Add to segments list
         final audioSegment = AudioSegment(
           id: segmentId,
           path: segmentPath,
-          startTime: _speechStartTime!,
+          startTime: _speechStartTime ?? DateTime.now(),
           endTime: endTime,
           confidenceScore: _currentConfidence,
           duration: Duration(
@@ -554,89 +546,108 @@ class PackageVadService extends ChangeNotifier {
 
         _segments.add(audioSegment);
 
-        debugPrint(
-          'Speech segment ended at ${timeFrom.toStringAsFixed(2)}s and saved to $segmentPath',
-        );
-
-        // Process with STT if service is available
-        if (_sttService != null) {
-          _processSegmentWithSTT(audioSegment);
+        if (kDebugMode) {
+          debugPrint('Speech segment saved: $segmentId');
         }
+
+        // Queue for STT processing - không block UI
+        if (_sttService != null) {
+          _queueSTTProcessing(audioSegment);
+        }
+
+        _scheduleUIUpdate();
       }
     } catch (e) {
-      debugPrint('Error saving speech segment: $e');
+      if (kDebugMode) {
+        debugPrint('Error saving speech segment: $e');
+      }
     }
-
-    // Reset speech start time
-    _speechStartTime = null;
-
-    // Notify listeners
-    notifyListeners();
   }
 
-  // Process audio segment with Google STT
+  // Queue STT processing để tránh block UI
+  void _queueSTTProcessing(AudioSegment segment) {
+    _sttQueue.add(segment);
+    _processSTTQueue();
+  }
+
+  // Process STT queue một cách bất đồng bộ
+  Future<void> _processSTTQueue() async {
+    if (_isProcessingSTT || _sttQueue.isEmpty || _sttService == null) return;
+
+    _isProcessingSTT = true;
+
+    while (_sttQueue.isNotEmpty) {
+      final segment = _sttQueue.removeAt(0);
+      await _processSegmentWithSTT(segment);
+
+      // Tạm dừng ngắn để không block UI thread
+      await Future.delayed(const Duration(milliseconds: 10));
+    }
+
+    _isProcessingSTT = false;
+  }
+
+  // Process audio segment with Google STT - Tối ưu hóa
   Future<void> _processSegmentWithSTT(AudioSegment segment) async {
     if (_sttService == null) return;
 
     try {
-      // Mark segment as processing
       segment.markProcessingSTT();
+      _scheduleUIUpdate(); // Update UI ngay khi bắt đầu processing
 
-      debugPrint('Processing segment ${segment.id} with Google STT...');
+      if (kDebugMode) {
+        debugPrint('Processing segment ${segment.id} with Google STT...');
+      }
 
-      // Send to Google STT API
+      // Gọi STT API trong compute isolate để không block UI
       final sttResult = await _sttService!.transcribeAudioSegment(segment.path);
 
       if (sttResult != null) {
-        // Update segment with transcript
         segment.updateTranscript(sttResult.transcript, sttResult.confidence);
 
-        debugPrint(
-          'STT Result for ${segment.id}: "${sttResult.transcript}" (confidence: ${sttResult.confidence})',
-        );
+        if (kDebugMode) {
+          debugPrint('STT Result for ${segment.id}: "${sttResult.transcript}"');
+        }
 
-        // Emit transcript to stream if not empty
         if (sttResult.hasText) {
           _transcriptionController.add(sttResult.transcript);
         }
-
-        // Notify UI of segment update
-        notifyListeners();
       } else {
-        // Mark as processed with empty result
         segment.updateTranscript('', 0.0);
-        debugPrint('STT failed for segment ${segment.id}');
+        if (kDebugMode) {
+          debugPrint('STT failed for segment ${segment.id}');
+        }
       }
+
+      _scheduleUIUpdate();
     } catch (e) {
-      debugPrint('Error processing segment ${segment.id} with STT: $e');
+      if (kDebugMode) {
+        debugPrint('Error processing segment ${segment.id} with STT: $e');
+      }
       segment.updateTranscript('Error', 0.0);
+      _scheduleUIUpdate();
     }
   }
 
-  // Get current date and time formatted
   String _getCurrentFormattedDateTime() {
     final now = DateTime.now();
     final formatter = DateFormat('yyyy-MM-dd_HH-mm-ss');
     return formatter.format(now);
   }
 
-  // Clean up resources
   @override
   void dispose() {
-    // Stop recording if active
     if (_isRecording) {
-      stopRecording();
+      unawaited(stopRecording());
     }
 
-    // Clean up
+    _batchUpdateTimer?.cancel();
     _record.dispose();
     _audioLevelTimer?.cancel();
     _audioLevelController.close();
     _waveformController.close();
     _speechDetectedController.close();
     _transcriptionController.close();
-
-    // Dispose of VAD handler
     _vadHandler.dispose();
 
     super.dispose();

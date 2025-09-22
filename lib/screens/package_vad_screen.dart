@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_google_stt/services/package_vad_service.dart';
+import 'package:flutter_google_stt/services/google_stt_service.dart';
+import 'package:flutter_google_stt/services/stt_test_service.dart';
 import 'package:flutter_google_stt/widgets/enhanced_waveform.dart';
 import 'package:flutter_google_stt/screens/transcript_screen.dart';
 import 'dart:async';
@@ -12,8 +14,8 @@ class PackageVADScreen extends StatefulWidget {
 }
 
 class _PackageVADScreenState extends State<PackageVADScreen> {
-  // VAD service instance
-  final _vadService = PackageVadService();
+  // VAD service instance with Google STT
+  late final PackageVadService _vadService;
 
   // State variables
   bool _isRecording = false;
@@ -37,7 +39,27 @@ class _PackageVADScreenState extends State<PackageVADScreen> {
   @override
   void initState() {
     super.initState();
+    // Initialize VAD service with Google STT service
+    _vadService = PackageVadService(sttService: _initializeSTTService());
     _setupSubscriptions();
+  }
+
+  // Initialize the Google STT service with API key from .env
+  GoogleSTTService? _initializeSTTService() {
+    // Use the existing singleton STT service that was initialized in main.dart
+    final sttService = STTTestService.instance;
+
+    if (sttService == null) {
+      debugPrint(
+        'Warning: STT Service is not available. Check API key configuration in .env file.',
+      );
+    } else {
+      debugPrint(
+        'STT Service initialized successfully and connected to VAD service',
+      );
+    }
+
+    return sttService;
   }
 
   void _setupSubscriptions() {
