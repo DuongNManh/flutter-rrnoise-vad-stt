@@ -81,15 +81,16 @@ class CleanVADService extends ChangeNotifier {
       _currentConfidence = 0.0;
       _isSpeechActive = false;
 
-      // Start VAD
+      // Start VAD với cấu hình tối ưu cho câu ngắn
       await _vadHandler.startListening(
         model: 'v5',
         frameSamples: 512,
-        positiveSpeechThreshold: _config.positiveSpeechThreshold,
-        negativeSpeechThreshold: _config.negativeSpeechThreshold,
-        minSpeechFrames: _config.minSpeechFrames,
-        preSpeechPadFrames: 2,
-        redemptionFrames: 8,
+        positiveSpeechThreshold: 0.25, // Giảm ngưỡng để phát hiện nhanh hơn
+        negativeSpeechThreshold: 0.1, // Giảm để nhạy hơn với kết thúc câu
+        minSpeechFrames: 1, // Phát hiện ngay lập tức khi có giọng nói
+        preSpeechPadFrames:
+            12, // Tăng đáng kể để bắt đầu từ trước khi nói (~96ms)
+        redemptionFrames: 24, // Tăng để có thêm thời gian sau khi nói (~160ms)
         submitUserSpeechOnPause: false,
       );
 
@@ -149,8 +150,17 @@ class CleanVADService extends ChangeNotifier {
 
     _isSpeechActive = true;
 
-    // Apply pre-buffer padding
-    _speechStartTime = DateTime.now().subtract(_config.preBufferDuration);
+    // Tính toán prebuffer tối ưu cho câu ngắn
+    // Thêm prebuffer lớn hơn (mặc định + 150ms bổ sung)
+    final extraPreBuffer = Duration(milliseconds: 150);
+    final totalPreBuffer = Duration(
+      milliseconds:
+          _config.preBufferDuration.inMilliseconds +
+          extraPreBuffer.inMilliseconds,
+    );
+
+    // Apply pre-buffer padding lớn hơn
+    _speechStartTime = DateTime.now().subtract(totalPreBuffer);
 
     // Ensure start time is not before recording start
     if (_audioBuffer.recordingStartTime != null &&
@@ -163,7 +173,7 @@ class CleanVADService extends ChangeNotifier {
 
     if (kDebugMode) {
       debugPrint(
-        'Speech started with ${_config.preBufferDuration.inMilliseconds}ms pre-buffer',
+        'Speech started with ${totalPreBuffer.inMilliseconds}ms enhanced pre-buffer',
       );
     }
   }
@@ -210,24 +220,53 @@ class CleanVADService extends ChangeNotifier {
   Future<void> _finalizeSpeechSegment() async {
     if (_speechStartTime == null) return;
 
-    final endTime = DateTime.now();
+    var endTime = DateTime.now(); // Sử dụng var thay vì final
     final segmentId = 'segment_${DateTime.now().microsecondsSinceEpoch}';
+    final segmentDuration = endTime.difference(_speechStartTime!);
 
     try {
-      // Check if we have enough buffer data
+      // Nếu đây là câu nói ngắn (dưới 1 giây), áp dụng chiến lược đặc biệt
+      bool isShortUtterance = segmentDuration.inMilliseconds < 1000;
+      if (isShortUtterance) {
+        if (kDebugMode) {
+          debugPrint(
+            'Detected short utterance: ${segmentDuration.inMilliseconds}ms - applying special handling',
+          );
+        }
+
+        // Mở rộng thời gian kết thúc để đảm bảo bắt được toàn bộ câu nói ngắn
+        endTime = endTime.add(Duration(milliseconds: 200));
+      }
+
+      // Kiểm tra buffer data ít nghiêm ngặt hơn
       if (_audioBuffer.recordingStartTime != null) {
         final bufferDuration = endTime.difference(
           _audioBuffer.recordingStartTime!,
         );
-        final segmentDuration = endTime.difference(_speechStartTime!);
 
-        if (bufferDuration.inMilliseconds < segmentDuration.inMilliseconds) {
+        // Chỉ kiểm tra nếu khác biệt quá lớn (50% thời lượng buffer)
+        if (bufferDuration.inMilliseconds * 0.5 >
+            segmentDuration.inMilliseconds) {
           if (kDebugMode) {
             debugPrint(
-              'Insufficient buffer data: buffer ${bufferDuration.inMilliseconds}ms, segment ${segmentDuration.inMilliseconds}ms',
+              'Buffer may be insufficient but proceeding: buffer ${bufferDuration.inMilliseconds}ms, segment ${segmentDuration.inMilliseconds}ms',
             );
           }
-          return;
+          // Tiếp tục xử lý thay vì return
+        }
+      }
+
+      // Tính toán lại thời điểm bắt đầu cho các câu nói ngắn
+      if (isShortUtterance) {
+        // Mở rộng thêm thời gian bắt đầu để đảm bảo bắt được từ đầu tiên
+        _speechStartTime = _speechStartTime!.subtract(
+          Duration(milliseconds: 100),
+        );
+
+        // Đảm bảo không vượt quá thời điểm bắt đầu ghi âm
+        if (_audioBuffer.recordingStartTime != null &&
+            _speechStartTime!.isBefore(_audioBuffer.recordingStartTime!)) {
+          _speechStartTime = _audioBuffer.recordingStartTime;
         }
       }
 
@@ -237,11 +276,22 @@ class CleanVADService extends ChangeNotifier {
         endTime: endTime,
       );
 
-      if (audioData == null || audioData.isEmpty) {
+      if (audioData == null) {
         if (kDebugMode) {
-          debugPrint('Failed to extract audio segment');
+          debugPrint(
+            'Failed to extract audio segment - completely null buffer, skipping segment',
+          );
         }
         return;
+      }
+
+      if (audioData.isEmpty) {
+        if (kDebugMode) {
+          debugPrint(
+            'Extracted audio segment is empty, but proceeding with minimum data',
+          );
+        }
+        // Vẫn tiếp tục xử lý với dữ liệu tối thiểu thay vì return
       }
 
       if (kDebugMode) {
@@ -308,27 +358,71 @@ class CleanVADService extends ChangeNotifier {
       segment.markProcessing();
       _scheduleUIUpdate();
 
+      // Xác định đây có phải là đoạn giọng nói ngắn không
+      final isShortSegment = segment.duration.inMilliseconds < 1000;
+      final priority = isShortSegment
+          ? 'high'
+          : 'normal'; // Ưu tiên cho câu ngắn
+
       if (kDebugMode) {
         debugPrint(
-          'Processing segment ${segment.id} with STT (${segment.audioData!.length} bytes)',
+          'Processing ${isShortSegment ? "SHORT" : "normal"} segment ${segment.id} with STT (${segment.audioData!.length} bytes, priority: $priority)',
         );
       }
 
-      // Call STT API with audio buffer
+      // Call STT API with audio buffer và xử lý đặc biệt cho đoạn ngắn
       final sttResult = await _sttService.transcribeAudioBuffer(
         segment.audioData!,
         debugName: segment.id,
       );
 
       if (sttResult != null) {
-        segment.updateTranscript(sttResult.transcript, sttResult.confidence);
+        var transcript = sttResult.transcript;
+
+        // Đối với câu nói ngắn, thực hiện hậu xử lý
+        if (isShortSegment) {
+          if (transcript.isNotEmpty) {
+            // Nếu câu nói ngắn không có từ bắt đầu thông thường, có thể bị thiếu đầu câu
+            final commonStartingWords = [
+              'Xin',
+              'Vâng',
+              'Dạ',
+              'Thưa',
+              'Ừ',
+              'À',
+              'Này',
+              'Đây',
+              'Chào',
+              'Đúng',
+              'Không',
+            ];
+            bool hasCommonStart = false;
+
+            for (final word in commonStartingWords) {
+              if (transcript.startsWith(word)) {
+                hasCommonStart = true;
+                break;
+              }
+            }
+
+            if (!hasCommonStart) {
+              if (kDebugMode) {
+                debugPrint('⚠️ Có khả năng thiếu đầu câu trong phân đoạn ngắn');
+              }
+              // Đánh dấu transcript có thể thiếu phần đầu
+              transcript = '... ' + transcript;
+            }
+          }
+        }
+
+        segment.updateTranscript(transcript, sttResult.confidence);
 
         if (sttResult.hasText) {
           _transcriptController.add(segment);
 
           if (kDebugMode) {
             debugPrint(
-              'STT Result: "${sttResult.transcript}" (conf: ${sttResult.confidence.toStringAsFixed(2)})',
+              'STT Result: "${transcript}" (conf: ${sttResult.confidence.toStringAsFixed(2)})',
             );
           }
         }

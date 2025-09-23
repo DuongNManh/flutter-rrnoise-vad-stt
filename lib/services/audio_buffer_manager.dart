@@ -8,7 +8,8 @@ class AudioBufferManager {
   static const int _bitsPerSample = 16;
   static const int _bytesPerSample = 2;
   static const int _wavHeaderSize = 44;
-  static const int _maxBufferSizeBytes = 10 * 1024 * 1024; // 10MB max
+  static const int _maxBufferSizeBytes =
+      30 * 1024 * 1024; // Tăng lên 30MB để giữ nhiều audio hơn
 
   // Main audio buffer with WAV header
   final List<int> _buffer = [];
@@ -54,53 +55,64 @@ class AudioBufferManager {
     _checkBufferSize();
   }
 
-  /// Extract audio segment from buffer
+  /// Extract audio segment from buffer with relaxed validation
   Uint8List? extractSegment({
     required DateTime startTime,
     required DateTime endTime,
   }) {
     if (_recordingStartTime == null) return null;
 
-    final startOffsetMs = startTime
+    // Tính toán offset thời gian
+    var startOffsetMs = startTime
         .difference(_recordingStartTime!)
         .inMilliseconds;
-    final endOffsetMs = endTime.difference(_recordingStartTime!).inMilliseconds;
+    var endOffsetMs = endTime.difference(_recordingStartTime!).inMilliseconds;
 
-    // Convert time to byte positions
+    // Đảm bảo startTime và endTime không âm
+    startOffsetMs = math.max(0, startOffsetMs);
+    endOffsetMs = math.max(
+      startOffsetMs + 100,
+      endOffsetMs,
+    ); // Đảm bảo ít nhất 100ms
+
+    // Convert time to byte positions với độ linh hoạt
     final bytesPerMs = (_sampleRate * _bytesPerSample) / 1000;
     final requestedStartPos =
         _wavHeaderSize + (startOffsetMs * bytesPerMs).round();
     final requestedEndPos = _wavHeaderSize + (endOffsetMs * bytesPerMs).round();
 
-    // Clamp positions to actual buffer bounds
+    // Clamp positions to actual buffer bounds với độ linh hoạt cao hơn
     final actualStartPos = math.max(_wavHeaderSize, requestedStartPos);
     final actualEndPos = math.min(_buffer.length, requestedEndPos);
 
-    // Validate positions after clamping
-    if (actualStartPos >= actualEndPos ||
-        actualEndPos <= _wavHeaderSize ||
-        actualStartPos >= _buffer.length) {
+    // Kiểm tra ít nghiêm ngặt hơn
+    if (actualStartPos >= _buffer.length || actualEndPos <= _wavHeaderSize) {
+      // Chỉ trả về null nếu hoàn toàn không thể trích xuất
       if (kDebugMode) {
         debugPrint(
-          'Invalid segment after clamping: requested $requestedStartPos-$requestedEndPos, actual $actualStartPos-$actualEndPos (buffer size: ${_buffer.length})',
+          'Buffer range completely invalid: requested $requestedStartPos-$requestedEndPos, actual $actualStartPos-$actualEndPos (buffer size: ${_buffer.length})',
         );
       }
       return null;
     }
 
-    // Check if we have meaningful audio data
-    final segmentAudioSize = actualEndPos - actualStartPos;
-    if (segmentAudioSize < 1000) {
-      // Less than ~30ms of audio
+    // Đảm bảo actualStartPos < actualEndPos
+    final safeStartPos = math.min(actualStartPos, actualEndPos - 1);
+    final safeEndPos = math.max(safeStartPos + 1, actualEndPos);
+
+    // Giảm kích thước tối thiểu xuống ~15ms audio thay vì 30ms
+    final segmentSize = safeEndPos - safeStartPos;
+    if (segmentSize < 500) {
       if (kDebugMode) {
         debugPrint(
-          'Segment too small: ${segmentAudioSize} bytes (~${(segmentAudioSize / bytesPerMs).toStringAsFixed(1)}ms)',
+          'Segment very small but proceeding: ${segmentSize} bytes (~${(segmentSize / bytesPerMs).toStringAsFixed(1)}ms)',
         );
       }
-      return null;
+      // Không trả về null, vẫn tiếp tục xử lý
     }
 
-    final totalSegmentSize = _wavHeaderSize + segmentAudioSize;
+    // Sử dụng safeStartPos và safeEndPos để đảm bảo tính nhất quán
+    final totalSegmentSize = _wavHeaderSize + segmentSize;
 
     // Create segment buffer with WAV header
     final segmentBuffer = Uint8List(totalSegmentSize);
@@ -111,15 +123,27 @@ class AudioBufferManager {
     }
 
     // Copy audio data
-    for (int i = 0; i < segmentAudioSize; i++) {
-      segmentBuffer[_wavHeaderSize + i] = _buffer[actualStartPos + i];
+    try {
+      for (int i = 0; i < segmentSize; i++) {
+        if (safeStartPos + i < _buffer.length) {
+          // Thêm kiểm tra để tránh lỗi index out of range
+          segmentBuffer[_wavHeaderSize + i] = _buffer[safeStartPos + i];
+        } else {
+          break; // Dừng copy nếu vượt quá buffer
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('Exception during audio segment extraction: $e');
+      }
+      // Vẫn tiếp tục xử lý, không return null
     }
 
     // Update segment WAV header
-    _updateSegmentWavHeader(segmentBuffer, segmentAudioSize);
+    _updateSegmentWavHeader(segmentBuffer, segmentSize);
 
     if (kDebugMode) {
-      final actualDurationMs = (actualEndPos - actualStartPos) / bytesPerMs;
+      final actualDurationMs = segmentSize / bytesPerMs;
       final requestedDurationMs = endOffsetMs - startOffsetMs;
       debugPrint(
         'Extracted segment: requested ${requestedDurationMs.toStringAsFixed(1)}ms, actual ${actualDurationMs.toStringAsFixed(1)}ms, ${segmentBuffer.length} bytes',
@@ -252,8 +276,11 @@ class AudioBufferManager {
 
   void _checkBufferSize() {
     if (_buffer.length > _maxBufferSizeBytes) {
-      // Remove oldest audio data (keep header)
-      final excessBytes = _buffer.length - _maxBufferSizeBytes;
+      // Tính toán số bytes cần xóa, nhưng giữ lại nhiều hơn để đảm bảo bắt được các câu ngắn
+      final targetSize =
+          _maxBufferSizeBytes *
+          0.7; // Giữ lại nhiều hơn (70% thay vì xóa hết đến 50%)
+      final excessBytes = _buffer.length - targetSize;
       final bytesToRemove =
           (excessBytes ~/ 1000) * 1000; // Remove in 1KB chunks
 
@@ -262,8 +289,19 @@ class AudioBufferManager {
         _totalAudioBytes -= bytesToRemove;
         _updateWavHeader();
 
+        // Cập nhật lại thời gian bắt đầu ghi âm dựa trên lượng dữ liệu đã xóa
+        if (_recordingStartTime != null) {
+          final msRemoved =
+              bytesToRemove / ((_sampleRate * _bytesPerSample) / 1000);
+          _recordingStartTime = _recordingStartTime!.add(
+            Duration(milliseconds: msRemoved.round()),
+          );
+        }
+
         if (kDebugMode) {
-          debugPrint('Buffer trimmed: removed ${bytesToRemove} bytes');
+          debugPrint(
+            'Buffer optimized: removed ${bytesToRemove} bytes, audio history adjusted',
+          );
         }
       }
     }
@@ -333,7 +371,7 @@ class SpeechDetectionConfig {
     this.negativeSpeechThreshold = 0.2,
     this.minSpeechFrames = 1,
     this.maxLowConfidenceFrames = 10,
-    this.preBufferDuration = const Duration(milliseconds: 200),
-    this.postBufferDuration = const Duration(milliseconds: 300),
+    this.preBufferDuration = const Duration(milliseconds: 500),
+    this.postBufferDuration = const Duration(milliseconds: 700),
   });
 }

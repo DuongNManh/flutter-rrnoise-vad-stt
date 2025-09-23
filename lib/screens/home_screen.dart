@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_google_stt/screens/recording_screen.dart';
 import 'package:flutter_google_stt/screens/stt_test_screen.dart';
+import 'package:flutter_google_stt/screens/synchronized_vad_screen.dart';
 import 'package:flutter_google_stt/screens/voice_recording_screen.dart';
 
 class HomeScreen extends StatelessWidget {
@@ -106,6 +107,29 @@ class HomeScreen extends StatelessWidget {
                 ),
                 minimumSize: const Size(250, 50),
                 backgroundColor: Colors.orange,
+                foregroundColor: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const SynchronizedVADScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.play_circle),
+              label: const Text('Voice Recording Test v2'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 32,
+                  vertical: 12,
+                ),
+                minimumSize: const Size(250, 50),
+                backgroundColor: const Color.fromARGB(255, 76, 122, 175),
                 foregroundColor: Colors.white,
               ),
             ),
