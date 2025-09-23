@@ -15,7 +15,20 @@ class GoogleSTTService {
   // Connection pool để tái sử dụng connection
   static final http.Client _httpClient = http.Client();
 
+  // Thêm các biến để lưu trữ ngôn ngữ
+  String _languageCode = 'en-US';
+  List<String> _alternativeLanguageCodes = ['vi-VN'];
+
   GoogleSTTService(this._apiKey);
+
+  // Thêm getters và setters cho ngôn ngữ
+  String get languageCode => _languageCode;
+  List<String> get alternativeLanguageCodes => _alternativeLanguageCodes;
+
+  void setLanguages(String mainLanguage, List<String> alternativeLanguages) {
+    _languageCode = mainLanguage;
+    _alternativeLanguageCodes = alternativeLanguages;
+  }
 
   /// Transcribe audio buffer directly to text using Google Speech-to-Text API
   /// Phương thức này xử lý trực tiếp dữ liệu audio từ buffer thay vì file
@@ -71,6 +84,8 @@ class GoogleSTTService {
         'apiKey': _apiKey,
         'audioFormat': audioFormat,
         'sampleRate': sampleRate,
+        'languageCode': _languageCode,
+        'alternativeLanguageCodes': _alternativeLanguageCodes,
       });
 
       return result;
@@ -143,6 +158,9 @@ class GoogleSTTService {
       final String apiKey = params['apiKey'];
       final String audioFormat = params['audioFormat'] ?? 'LINEAR16';
       final int sampleRate = params['sampleRate'] ?? 16000;
+      final String languageCode = params['languageCode'] ?? 'en-US';
+      final List<String> alternativeLanguageCodes =
+          params['alternativeLanguageCodes'] ?? ['vi-VN'];
 
       // Convert to base64 trong isolate
       final audioBase64 = base64Encode(audioBytes);
@@ -151,14 +169,13 @@ class GoogleSTTService {
         'config': {
           'encoding': audioFormat,
           'sampleRateHertz': sampleRate,
-          'languageCode': 'en-US',
-          'alternativeLanguageCodes': ['vi-VN'],
+          'languageCode': languageCode,
+          'alternativeLanguageCodes': alternativeLanguageCodes,
           'enableAutomaticPunctuation': true,
           'model': 'latest_short',
           'useEnhanced': true,
           'maxAlternatives': 1,
           'profanityFilter': false,
-          // Thêm timeout để tránh request bị treo
           'speechContexts': [],
         },
         'audio': {'content': audioBase64},
@@ -561,6 +578,22 @@ class GoogleSTTService {
     ];
   }
 
+  // Thêm danh sách ngôn ngữ được hỗ trợ với một số thông tin bổ sung
+  static List<LanguageOption> getSupportedLanguageOptions() {
+    return [
+      LanguageOption('vi-VN', 'Vietnamese', 'Tiếng Việt'),
+      LanguageOption('en-US', 'English (US)', 'English (US)'),
+      LanguageOption('en-GB', 'English (UK)', 'English (UK)'),
+      LanguageOption('ja-JP', 'Japanese', '日本語'),
+      LanguageOption('ko-KR', 'Korean', '한국어'),
+      LanguageOption('zh-CN', 'Chinese (Simplified)', '简体中文'),
+      LanguageOption('zh-TW', 'Chinese (Traditional)', '繁體中文'),
+      LanguageOption('th-TH', 'Thai', 'ภาษาไทย'),
+      LanguageOption('id-ID', 'Indonesian', 'Bahasa Indonesia'),
+      LanguageOption('ms-MY', 'Malay', 'Bahasa Melayu'),
+    ];
+  }
+
   /// Dispose resources
   void dispose() {
     // Đóng HTTP client khi không dùng nữa
@@ -651,4 +684,18 @@ class STTResult {
   @override
   int get hashCode =>
       transcript.hashCode ^ confidence.hashCode ^ audioLength.hashCode;
+}
+
+// Thêm class mới để quản lý các tùy chọn ngôn ngữ
+class LanguageOption {
+  final String code;
+  final String nameEn;
+  final String nameNative;
+
+  LanguageOption(this.code, this.nameEn, this.nameNative);
+
+  @override
+  String toString() => '$nameEn ($code)';
+
+  String get displayName => '$nameEn - $nameNative';
 }

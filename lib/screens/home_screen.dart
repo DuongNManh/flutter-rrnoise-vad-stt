@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_google_stt/screens/recording_screen.dart';
 import 'package:flutter_google_stt/screens/stt_test_screen.dart';
 import 'package:flutter_google_stt/screens/synchronized_vad_screen.dart';
-import 'package:flutter_google_stt/screens/voice_recording_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -40,51 +38,6 @@ class HomeScreen extends StatelessWidget {
                 'Test voice activity detection and speech recognition features',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 16, color: Colors.grey),
-              ),
-            ),
-            const SizedBox(height: 60),
-
-            // Navigation buttons
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const RecordingScreen(),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.mic),
-              label: const Text('Recording Demo'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 32,
-                  vertical: 12,
-                ),
-                minimumSize: const Size(250, 50),
-              ),
-            ),
-            const SizedBox(height: 20),
-
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const VoiceRecordingScreen(),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.play_circle),
-              label: const Text('Voice Recording Test'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 32,
-                  vertical: 12,
-                ),
-                minimumSize: const Size(250, 50),
-                backgroundColor: Colors.green,
-                foregroundColor: Colors.white,
               ),
             ),
             const SizedBox(height: 20),

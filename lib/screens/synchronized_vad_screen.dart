@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_google_stt/services/audio_buffer_manager.dart';
+import 'package:flutter_google_stt/models/speech_segment.dart';
 import 'package:flutter_google_stt/services/synchronized_vad_service.dart';
+import 'package:flutter_google_stt/services/google_stt_service.dart';
 import '../services/stt_test_service.dart';
 
 class SynchronizedVADScreen extends StatefulWidget {
@@ -17,11 +18,33 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
   double _audioLevel = 0.0;
   List<SpeechSegment> _segments = [];
   String _fullTranscript = '';
+  
+  // Thêm các biến cho ngôn ngữ
+  final List<LanguageOption> _languageOptions = GoogleSTTService.getSupportedLanguageOptions();
+  LanguageOption? _selectedMainLanguage;
+  List<LanguageOption> _selectedAlternativeLanguages = [];
 
   @override
   void initState() {
     super.initState();
+    _initializeLanguages();
     _initializeVADService();
+  }
+  
+  void _initializeLanguages() {
+    // Mặc định ngôn ngữ chính là tiếng Anh (US)
+    _selectedMainLanguage = _languageOptions.firstWhere(
+      (lang) => lang.code == 'en-US',
+      orElse: () => _languageOptions.first,
+    );
+    
+    // Mặc định ngôn ngữ phụ là tiếng Việt
+    _selectedAlternativeLanguages = [
+      _languageOptions.firstWhere(
+        (lang) => lang.code == 'vi-VN',
+        orElse: () => _languageOptions[1],
+      ),
+    ];
   }
 
   void _initializeVADService() {
@@ -81,6 +104,29 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
         _fullTranscript = _vadService.getFullTranscript();
       });
     });
+    
+    // Cập nhật ngôn ngữ nếu STT service có sẵn
+    if (sttService != null) {
+      final mainCode = _selectedMainLanguage?.code ?? 'en-US';
+      final altCodes = _selectedAlternativeLanguages.map((e) => e.code).toList();
+      sttService.setLanguages(mainCode, altCodes);
+    }
+  }
+  
+  // Thêm phương thức để cập nhật ngôn ngữ
+  void _updateLanguageSettings() {
+    if (_selectedMainLanguage != null) {
+      final mainCode = _selectedMainLanguage!.code;
+      final altCodes = _selectedAlternativeLanguages.map((e) => e.code).toList();
+      _vadService.updateLanguageSettings(mainCode, altCodes);
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Language updated: ${_selectedMainLanguage!.nameEn} + ${_selectedAlternativeLanguages.length} alternative(s)'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   Future<void> _startRecording() async {
@@ -103,6 +149,11 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
       appBar: AppBar(
         title: const Text('Synchronized VAD Test'),
         actions: [
+          // Thêm nút cấu hình ngôn ngữ
+          IconButton(
+            icon: const Icon(Icons.language),
+            onPressed: () => _showLanguageDialog(),
+          ),
           IconButton(
             icon: const Icon(Icons.clear),
             onPressed: _vadService.isRecording
@@ -124,7 +175,9 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
         child: Column(
           children: [
             _buildRecordingControls(),
-            const SizedBox(height: 20),
+            const SizedBox(height: 12),
+            _buildLanguageDisplay(), // Thêm widget hiển thị ngôn ngữ đã chọn
+            const SizedBox(height: 12),
             _buildStatusIndicators(),
             const SizedBox(height: 20),
             _buildAudioLevelIndicator(),
@@ -134,6 +187,131 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
             Expanded(child: _buildSegmentsList()),
           ],
         ),
+      ),
+    );
+  }
+  
+  // Thêm widget hiển thị ngôn ngữ đã chọn
+  Widget _buildLanguageDisplay() {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.blue.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.blue.withOpacity(0.5)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.language, size: 20, color: Colors.blue),
+          const SizedBox(width: 8),
+          Text(
+            'Main: ${_selectedMainLanguage?.nameEn ?? "None"}',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(width: 16),
+          Text(
+            'Alt: ${_selectedAlternativeLanguages.map((e) => e.nameEn).join(", ")}',
+            style: const TextStyle(fontStyle: FontStyle.italic),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // Thêm dialog để chọn ngôn ngữ
+  void _showLanguageDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            title: const Text('Select Languages'),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Main Language:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  DropdownButton<LanguageOption>(
+                    isExpanded: true,
+                    value: _selectedMainLanguage,
+                    items: _languageOptions.map((language) {
+                      return DropdownMenuItem<LanguageOption>(
+                        value: language,
+                        child: Text(language.displayName),
+                      );
+                    }).toList(),
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedMainLanguage = value;
+                        
+                        // Đảm bảo ngôn ngữ phụ không trùng với ngôn ngữ chính
+                        _selectedAlternativeLanguages.removeWhere(
+                          (lang) => lang.code == value?.code
+                        );
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Alternative Languages:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 200,
+                    child: ListView(
+                      children: _languageOptions
+                          .where((lang) => lang != _selectedMainLanguage)
+                          .map((language) {
+                        return CheckboxListTile(
+                          title: Text(language.displayName),
+                          value: _selectedAlternativeLanguages.contains(language),
+                          onChanged: (selected) {
+                            setState(() {
+                              if (selected == true) {
+                                if (!_selectedAlternativeLanguages.contains(language)) {
+                                  _selectedAlternativeLanguages.add(language);
+                                }
+                              } else {
+                                _selectedAlternativeLanguages.remove(language);
+                              }
+                            });
+                          },
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                child: const Text('CANCEL'),
+                onPressed: () => Navigator.pop(context),
+              ),
+              TextButton(
+                child: const Text('APPLY'),
+                onPressed: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    // Cập nhật state trong màn hình chính
+                    this.setState(() {});
+                  });
+                  _updateLanguageSettings();
+                },
+              ),
+            ],
+          );
+        },
       ),
     );
   }

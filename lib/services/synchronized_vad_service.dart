@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_google_stt/services/audio_buffer_manager.dart';
+import 'package:flutter_google_stt/models/speech_segment.dart';
 import 'package:vad/vad.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'google_stt_service.dart';
@@ -170,7 +170,7 @@ class SynchronizedVADService extends ChangeNotifier {
 
   SynchronizedVADService({GoogleSTTService? sttService})
     : _sttService = sttService {
-    _vadHandler = VadHandler.create(isDebug: kDebugMode);
+    _vadHandler = VadHandler.create(isDebug: false);
     _setupVADHandler();
     _startBatchUpdateTimer();
   }
@@ -512,6 +512,14 @@ class SynchronizedVADService extends ChangeNotifier {
 
     if (kDebugMode) {
       debugPrint('All data cleared');
+    }
+  }
+
+  // Thêm phương thức để cập nhật ngôn ngữ
+  void updateLanguageSettings(String mainLanguage, List<String> alternativeLanguages) {
+    if (_sttService != null) {
+      _sttService!.setLanguages(mainLanguage, alternativeLanguages);
+      _scheduleUIUpdate();
     }
   }
 
