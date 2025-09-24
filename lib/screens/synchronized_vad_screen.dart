@@ -1,5 +1,8 @@
+import 'dart:ffi';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_google_stt/models/speech_segment.dart';
+import 'package:flutter_google_stt/services/long_speech_vad_service.dart';
 import 'package:flutter_google_stt/services/synchronized_vad_service.dart';
 import 'package:flutter_google_stt/services/google_stt_service.dart';
 import '../services/stt_test_service.dart';
@@ -12,15 +15,16 @@ class SynchronizedVADScreen extends StatefulWidget {
 }
 
 class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
-  late SynchronizedVADService _vadService;
+  late LongSpeechVADService _vadService;
   double _currentConfidence = 0.0;
   bool _isSpeechActive = false;
   double _audioLevel = 0.0;
   List<SpeechSegment> _segments = [];
   String _fullTranscript = '';
-  
+
   // Thêm các biến cho ngôn ngữ
-  final List<LanguageOption> _languageOptions = GoogleSTTService.getSupportedLanguageOptions();
+  final List<LanguageOption> _languageOptions =
+      GoogleSTTService.getSupportedLanguageOptions();
   LanguageOption? _selectedMainLanguage;
   List<LanguageOption> _selectedAlternativeLanguages = [];
 
@@ -30,14 +34,14 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
     _initializeLanguages();
     _initializeVADService();
   }
-  
+
   void _initializeLanguages() {
     // Mặc định ngôn ngữ chính là tiếng Anh (US)
     _selectedMainLanguage = _languageOptions.firstWhere(
       (lang) => lang.code == 'en-US',
       orElse: () => _languageOptions.first,
     );
-    
+
     // Mặc định ngôn ngữ phụ là tiếng Việt
     _selectedAlternativeLanguages = [
       _languageOptions.firstWhere(
@@ -49,7 +53,7 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
 
   void _initializeVADService() {
     final sttService = STTTestService.instance;
-    _vadService = SynchronizedVADService(sttService: sttService);
+    _vadService = LongSpeechVADService(sttService: sttService);
 
     if (sttService == null && mounted) {
       Future.microtask(() {
@@ -104,25 +108,31 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
         _fullTranscript = _vadService.getFullTranscript();
       });
     });
-    
+
     // Cập nhật ngôn ngữ nếu STT service có sẵn
     if (sttService != null) {
       final mainCode = _selectedMainLanguage?.code ?? 'en-US';
-      final altCodes = _selectedAlternativeLanguages.map((e) => e.code).toList();
+      final altCodes = _selectedAlternativeLanguages
+          .map((e) => e.code)
+          .toList();
       sttService.setLanguages(mainCode, altCodes);
     }
   }
-  
+
   // Thêm phương thức để cập nhật ngôn ngữ
   void _updateLanguageSettings() {
     if (_selectedMainLanguage != null) {
       final mainCode = _selectedMainLanguage!.code;
-      final altCodes = _selectedAlternativeLanguages.map((e) => e.code).toList();
+      final altCodes = _selectedAlternativeLanguages
+          .map((e) => e.code)
+          .toList();
       _vadService.updateLanguageSettings(mainCode, altCodes);
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Language updated: ${_selectedMainLanguage!.nameEn} + ${_selectedAlternativeLanguages.length} alternative(s)'),
+          content: Text(
+            'Language updated: ${_selectedMainLanguage!.nameEn} + ${_selectedAlternativeLanguages.length} alternative(s)',
+          ),
           duration: const Duration(seconds: 2),
         ),
       );
@@ -190,7 +200,7 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
       ),
     );
   }
-  
+
   // Thêm widget hiển thị ngôn ngữ đã chọn
   Widget _buildLanguageDisplay() {
     return Container(
@@ -220,7 +230,7 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
       ),
     );
   }
-  
+
   // Thêm dialog để chọn ngôn ngữ
   void _showLanguageDialog() {
     showDialog(
@@ -252,10 +262,10 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
                     onChanged: (value) {
                       setState(() {
                         _selectedMainLanguage = value;
-                        
+
                         // Đảm bảo ngôn ngữ phụ không trùng với ngôn ngữ chính
                         _selectedAlternativeLanguages.removeWhere(
-                          (lang) => lang.code == value?.code
+                          (lang) => lang.code == value?.code,
                         );
                       });
                     },
@@ -272,22 +282,31 @@ class _SynchronizedVADScreenState extends State<SynchronizedVADScreen> {
                       children: _languageOptions
                           .where((lang) => lang != _selectedMainLanguage)
                           .map((language) {
-                        return CheckboxListTile(
-                          title: Text(language.displayName),
-                          value: _selectedAlternativeLanguages.contains(language),
-                          onChanged: (selected) {
-                            setState(() {
-                              if (selected == true) {
-                                if (!_selectedAlternativeLanguages.contains(language)) {
-                                  _selectedAlternativeLanguages.add(language);
-                                }
-                              } else {
-                                _selectedAlternativeLanguages.remove(language);
-                              }
-                            });
-                          },
-                        );
-                      }).toList(),
+                            return CheckboxListTile(
+                              title: Text(language.displayName),
+                              value: _selectedAlternativeLanguages.contains(
+                                language,
+                              ),
+                              onChanged: (selected) {
+                                setState(() {
+                                  if (selected == true) {
+                                    if (!_selectedAlternativeLanguages.contains(
+                                      language,
+                                    )) {
+                                      _selectedAlternativeLanguages.add(
+                                        language,
+                                      );
+                                    }
+                                  } else {
+                                    _selectedAlternativeLanguages.remove(
+                                      language,
+                                    );
+                                  }
+                                });
+                              },
+                            );
+                          })
+                          .toList(),
                     ),
                   ),
                 ],
