@@ -37,7 +37,7 @@ class SynchronizedVADService extends ChangeNotifier {
   bool _hasPendingUIUpdate = false;
 
   // Configuration
-  static const Duration _speechEndDelay = Duration(milliseconds: 800);
+  static const Duration _speechEndDelay = Duration(milliseconds: 1500);
   static const Duration _preBufferPadding = Duration(milliseconds: 300);
   static const Duration _postBufferPadding = Duration(milliseconds: 500);
 
@@ -96,36 +96,27 @@ class SynchronizedVADService extends ChangeNotifier {
   void _onSpeechStart() {
     if (!_isRecording) return;
 
+    // Nếu trước đó có segment end đang chờ finalize thì finalize luôn
+    if (_speechStartTime != null && !_isSpeechActive) {
+      _finalizeSpeechSegment();
+    }
+
     _speechEndTimer?.cancel();
     _isSpeechActive = true;
 
     final now = DateTime.now();
     _speechStartTime = now;
-
-    // Calculate actual speech start with pre-buffer
     _realSpeechStartTime = now.subtract(_preBufferPadding);
 
     _speechStateController.add(true);
     _scheduleUIUpdate();
-
-    if (kDebugMode) {
-      debugPrint('Speech START detected at ${now.millisecondsSinceEpoch}');
-      debugPrint(
-        'Real speech start (with pre-buffer): ${_realSpeechStartTime!.millisecondsSinceEpoch}',
-      );
-      debugPrint(
-        'Available buffer: ${_frameBuffer.availableDuration.inMilliseconds}ms',
-      );
-    }
   }
 
   void _onSpeechEnd() {
     if (!_isRecording || !_isSpeechActive) return;
 
-    // Cancel previous timer if exists
     _speechEndTimer?.cancel();
 
-    // Delay speech end processing to catch trailing audio
     _speechEndTimer = Timer(_speechEndDelay, () {
       _finalizeSpeechSegment();
     });
@@ -133,12 +124,6 @@ class SynchronizedVADService extends ChangeNotifier {
     _isSpeechActive = false;
     _speechStateController.add(false);
     _scheduleUIUpdate();
-
-    if (kDebugMode) {
-      debugPrint(
-        'Speech END detected, finalizing in ${_speechEndDelay.inMilliseconds}ms',
-      );
-    }
   }
 
   void _onFrameProcessed(frameData) {
@@ -195,11 +180,11 @@ class SynchronizedVADService extends ChangeNotifier {
       await _vadHandler.startListening(
         model: 'v5',
         frameSamples: 512, // ~32ms frames
-        positiveSpeechThreshold: 0.3, // More sensitive
-        negativeSpeechThreshold: 0.1, // Very sensitive to speech end
-        minSpeechFrames: 1,
+        positiveSpeechThreshold: 0.5,
+        negativeSpeechThreshold: 0.35,
+        minSpeechFrames: 3,
         preSpeechPadFrames: 8, // ~256ms pre-speech padding
-        redemptionFrames: 12, // ~384ms post-speech padding
+        redemptionFrames: 20, // ~384ms post-speech padding
         submitUserSpeechOnPause: false,
       );
 
@@ -249,38 +234,12 @@ class SynchronizedVADService extends ChangeNotifier {
     final duration = endTime.difference(_realSpeechStartTime!);
 
     try {
-      if (kDebugMode) {
-        debugPrint('Finalizing speech segment:');
-        debugPrint('  Start: ${_realSpeechStartTime!.millisecondsSinceEpoch}');
-        debugPrint('  End: ${endTime.millisecondsSinceEpoch}');
-        debugPrint('  Duration: ${duration.inMilliseconds}ms');
-        debugPrint(
-          '  Available buffer: ${_frameBuffer.availableDuration.inMilliseconds}ms',
-        );
-      }
-
-      // Extract audio with precise timing
       final audioData = _frameBuffer.extractAudioBetween(
         _realSpeechStartTime!,
         endTime,
       );
 
-      if (audioData == null) {
-        if (kDebugMode) {
-          debugPrint('Failed to extract audio segment - no matching frames');
-        }
-        return;
-      }
-
-      if (audioData.length <= 44) {
-        // Only WAV header
-        if (kDebugMode) {
-          debugPrint('Audio segment too small: ${audioData.length} bytes');
-        }
-        return;
-      }
-
-      // Create speech segment
+      // Luôn tạo segment, kể cả khi audioData null/nhỏ
       final segment = SpeechSegment(
         id: segmentId,
         startTime: _realSpeechStartTime!,
@@ -291,15 +250,21 @@ class SynchronizedVADService extends ChangeNotifier {
 
       _speechSegments.add(segment);
 
-      if (kDebugMode) {
+      if (audioData == null || audioData.length <= 44) {
+        // Segment không đủ dữ liệu
+        segment.updateTranscript('', 0.0);
         debugPrint(
-          'Speech segment created: ${audioData.length} bytes, ${duration.inMilliseconds}ms',
+          '⚠️ Created EMPTY segment: ${duration.inMilliseconds}ms (no audio data)',
         );
-      }
+      } else {
+        debugPrint(
+          '✅ Created speech segment: ${audioData.length} bytes, ${duration.inMilliseconds}ms',
+        );
 
-      // Queue for STT processing
-      if (_sttService != null) {
-        _queueSTTProcessing(segment);
+        // Queue STT processing nếu có audio
+        if (_sttService != null) {
+          _queueSTTProcessing(segment);
+        }
       }
 
       _scheduleUIUpdate();

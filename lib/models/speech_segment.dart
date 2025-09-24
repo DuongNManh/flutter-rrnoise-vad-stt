@@ -10,7 +10,9 @@ class SpeechSegment {
   // STT results
   String? transcript;
   double? sttConfidence;
+  String? language;
   bool isProcessing = false;
+  bool hasError = false;
 
   SpeechSegment({
     required this.id,
@@ -18,19 +20,34 @@ class SpeechSegment {
     required this.endTime,
     required this.confidence,
     this.audioData,
+    this.language,
+    this.isProcessing = false,
+    this.hasError = false,
   });
 
   Duration get duration => endTime.difference(startTime);
   bool get hasTranscript => transcript != null && transcript!.isNotEmpty;
 
-  void updateTranscript(String newTranscript, double confidence) {
+  void updateTranscript(
+    String newTranscript,
+    double confidence, {
+    String? detectedLanguage,
+  }) {
     transcript = newTranscript;
     sttConfidence = confidence;
+    language = detectedLanguage ?? language;
     isProcessing = false;
+    hasError = false;
   }
 
   void markProcessing() {
     isProcessing = true;
+    hasError = false;
+  }
+
+  void markError() {
+    isProcessing = false;
+    hasError = true;
   }
 
   Map<String, dynamic> toJson() {
